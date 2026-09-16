@@ -20,6 +20,10 @@
       {
         "command": "fullstack-lens.goToBackend",
         "title": "FullStack Lens: Go to Backend"
+      },
+      {
+        "command": "fullstack-lens.findFrontendUsages",
+        "title": "FullStack Lens: Find Frontend Usages"
       }
     ]
   },

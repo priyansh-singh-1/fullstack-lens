@@ -52,7 +52,7 @@ export class SpringEndpointScanner {
                     const fullPath= this.combinePaths(
                         basePath,
                         methodPath
-                    )
+                    );
 
                     endpoints.push({
                         method: mapping.method,
