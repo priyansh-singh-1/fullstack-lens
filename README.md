@@ -1,71 +1,166 @@
-# fullstack-lens README
+# FullStack Lens
 
-This is the README for your extension "fullstack-lens". After writing up a brief description, we recommend including the following sections.
+FullStack Lens is a VS Code extension that helps developers understand and navigate the connection between frontend API calls and backend endpoints in full-stack applications.
 
-## Features
+Instead of manually searching through frontend and backend code, FullStack Lens scans the workspace, identifies API relationships, and allows developers to navigate directly between connected parts of the application.
 
-Describe specific features of your extension including screenshots of your extension in action. Image paths are relative to this README file.
+## Current Features
 
-For example if there is an image subfolder under your extension project workspace:
+### REST API Analysis
 
-\!\[feature X\]\(images/feature-x.png\)
+FullStack Lens can detect Spring Boot REST endpoints such as:
 
-> Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
+```java
+@GetMapping("/history")
+@PostMapping("/login")
+@PutMapping("/user")
+@DeleteMapping("/message")
+```
 
-## Requirements
+It also detects frontend HTTP calls made using Axios and custom Axios instances.
 
-If you have any requirements or dependencies, add a section describing those and how to install and configure them.
+Example:
 
-## Extension Settings
+```javascript
+API.post("/auth/login", form);
+```
 
-Include if your extension adds any VS Code settings through the `contributes.configuration` extension point.
+FullStack Lens resolves the complete route and matches it with the corresponding Spring Boot endpoint.
+
+### Frontend → Backend Navigation
+
+Place the cursor on a frontend API call and run:
+
+`FullStack Lens: Go to Backend`
+
+The extension opens the corresponding Spring Boot controller and highlights the matched endpoint.
+
+### Backend → Frontend Navigation
+
+From a Spring Boot REST endpoint, run:
+
+`FullStack Lens: Find Frontend Usages`
+
+FullStack Lens finds frontend files that use the endpoint.
+
+If multiple usages exist, they are displayed in a selection menu.
+
+### WebSocket / STOMP Support
+
+FullStack Lens can detect Spring WebSocket endpoints using:
+
+```java
+@MessageMapping("/chat.send")
+```
+
+It resolves application destination prefixes such as:
+
+```java
+registry.setApplicationDestinationPrefixes("/app");
+```
+
+to produce:
+
+```text
+/app/chat.send
+```
+
+The extension also detects frontend STOMP publish and subscribe calls.
+
+Example:
+
+```javascript
+stompClient.publish({
+    destination: "/app/chat.send",
+    body: JSON.stringify(message)
+});
+```
+
+### WebSocket Frontend → Backend Navigation
+
+WebSocket publish destinations are matched with their corresponding Spring `@MessageMapping` endpoints.
 
 For example:
 
-This extension contributes the following settings:
+```text
+Frontend
+PUBLISH /app/chat.send
 
-* `myExtension.enable`: Enable/disable this extension.
-* `myExtension.thing`: Set to `blah` to do something.
+        ↓ FullStack Lens
 
-## Known Issues
+Backend
+@MessageMapping("/chat.send")
+```
 
-Calling out known issues can help limit users opening duplicate issues against your extension.
+`Go to Backend` works for both REST API calls and WebSocket publish calls.
 
-## Release Notes
+## How It Works
 
-Users appreciate release notes as you update your extension.
+```text
+Workspace
+   │
+   ├── Frontend
+   │     ├── REST API Scanner
+   │     └── WebSocket Scanner
+   │
+   ├── Backend
+   │     ├── Spring REST Scanner
+   │     └── Spring WebSocket Scanner
+   │
+   └── Matching Engine
+          │
+          ├── REST Endpoint Matching
+          └── WebSocket Destination Matching
+```
 
-### 1.0.0
+## Currently Supported
 
-Initial release of ...
+**Backend**
+- Spring Boot REST APIs
+- Spring WebSocket / STOMP
 
-### 1.0.1
+**Frontend**
+- JavaScript
+- TypeScript
+- Axios
+- Custom Axios instances
+- Fetch
+- STOMP publish
+- STOMP subscribe
 
-Fixed issue #.
+## Project Status
 
-### 1.1.0
+🚧 FullStack Lens is currently under active development.
 
-Added features X, Y, and Z.
+The project is being developed incrementally, with new framework support, navigation capabilities, diagnostics, and developer tooling planned for future releases.
 
----
+## Planned Features
 
-## Following extension guidelines
+- WebSocket backend → frontend navigation
+- CodeLens integration
+- Better unmatched endpoint diagnostics
+- Endpoint usage visualization
+- Additional frontend frameworks and HTTP clients
+- Additional backend framework support
+- Improved parsing and static analysis
+- Large-project performance improvements
 
-Ensure that you've read through the extensions guidelines and follow the best practices for creating your extension.
+## Development
 
-* [Extension Guidelines](https://code.visualstudio.com/api/references/extension-guidelines)
+Install dependencies:
 
-## Working with Markdown
+```bash
+npm install
+```
 
-You can author your README using Visual Studio Code. Here are some useful editor keyboard shortcuts:
+Compile:
 
-* Split the editor (`Cmd+\` on macOS or `Ctrl+\` on Windows and Linux).
-* Toggle preview (`Shift+Cmd+V` on macOS or `Shift+Ctrl+V` on Windows and Linux).
-* Press `Ctrl+Space` (Windows, Linux, macOS) to see a list of Markdown snippets.
+```bash
+npm run compile
+```
 
-## For more information
+Press `F5` in VS Code and select **VS Code Extension Development** to launch the extension in an Extension Development Host.
 
-* [Visual Studio Code's Markdown Support](http://code.visualstudio.com/docs/languages/markdown)
-* [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
+## Disclaimer
 
-**Enjoy!**
+FullStack Lens is under active development. API detection and matching capabilities may change as support for additional patterns and frameworks is added.
