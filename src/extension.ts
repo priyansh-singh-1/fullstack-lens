@@ -8,7 +8,24 @@ import { EndpointMatcher } from './core/matching/EndPointMatcher';
 import { SpringWebSocketScanner } from './core/parsing/spring/SpringWebSocketScanner';
 import { FrontendWebSocketScanner } from './core/parsing/frontend/FrontendWebSocketScanner';
 import { WebSocketMatcher } from './core/matching/WebSocketMatcher';
+import { FullStackCodeLensProvider } from './core/codelens/FullStackCodeLensProvider';
 
+
+
+
+
+interface NavigationTarget {
+    type: 'rest' | 'websocket';
+    filePath: string;
+    line: number;
+}
+
+function sameFilePath(
+    path1: string,
+    path2: string
+): boolean {
+    return path1.toLowerCase() === path2.toLowerCase();
+}
 
 // ==========================================
 // SHARED SERVICES
@@ -45,21 +62,149 @@ export function activate(context: vscode.ExtensionContext) {
     const goToBackendCommand =
         vscode.commands.registerCommand(
             'fullstack-lens.goToBackend',
-            goToBackend
+
+            async(target?: NavigationTarget)=>{
+                const editor = vscode.window.activeTextEditor;
+
+                if(!editor){
+                    vscode.window.showWarningMessage(
+                        'No active editor found.'
+                    );
+                    return;
+                }
+
+                const currentFile = target?.filePath ??
+                editor.document.uri.fsPath;
+
+                const currentLine= target?.line??
+                editor.selection.active.line;
+
+                const files= await indexer.indexWorkspace();
+
+                console.log('TARGET:', target);
+                console.log('CURRENT FILE:', currentFile);
+                console.log('CURRENT LINE:', currentLine);
+
+                // ==================================
+                // REST
+                // ==================================4
+
+                if(!target || target.type==='rest'){
+                    const endpoints= springScanner.scan(files);
+
+                    const frontendCall= frontendScanner.scan(files);
+
+                    const matches= endpointMatcher.match(
+                        frontendCall,
+                        endpoints
+                    );
+
+                    const currentCall= frontendCall.find(
+                        call =>
+                            sameFilePath(call.filePath, currentFile) &&
+                        call.line===currentLine
+                        
+                    );
+
+                    console.log('CURRENT CALL:', currentCall);
+
+                    if(currentCall){
+                        const result= matches.find(
+                            match =>
+                                match.call == currentCall
+                        );
+
+                        if(result?.endpoint){
+                            await openAndHighlight(
+                                result.endpoint.filePath,
+                                result.endpoint.line
+                            );
+                            return;
+                        }
+                    }
+                }
+
+                const frontendCall = frontendScanner.scan(files);
+                console.log('REST CALLS:',
+                    frontendCall.map(call => ({
+                    path: call.path,
+                    filePath: call.filePath,
+                    line: call.line
+                }))
+            );
+
+                // ==================================
+                // WEBSOCKET
+                // ==================================
+
+                if(!target || target.type==='websocket'){
+
+                    const webSocketEndpoints = springWebSocketScanner.scan(files);
+                    const webSocketCalls= frontendWebSocketScanner.scan(files);
+
+                    const websocketMatches= webSocketMatcher.match(
+                        webSocketCalls,
+                        webSocketEndpoints
+                    );
+
+                    const currentWebSocketCall= webSocketCalls.find(
+                        call =>
+                            sameFilePath(call.filePath, currentFile) &&
+                        call.line === currentLine &&
+                        call.type==='publish'
+                    );
+
+                    if(currentWebSocketCall){
+                        const result= websocketMatches.find(
+                            match =>
+                                match.call === currentWebSocketCall
+                        );
+
+                        if(result?.endpoint){
+                            await openAndHighlight(
+                                result.endpoint.filePath,
+                                result.endpoint.line
+                            );
+
+                            return;
+                        }
+                    }
+                }
+                vscode.window.showWarningMessage(
+                 'No matching REST or WebSocket backend endpoint found.'
+            );
+
+            }
+            
         );
 
     const findFrontendUsagesCommand =
         vscode.commands.registerCommand(
             'fullstack-lens.findFrontendUsages',
+             
             findFrontendUsages
         );
 
+        const codeLensProvider= new FullStackCodeLensProvider();
+
+    const codeLensDisposable = vscode.languages.registerCodeLensProvider(
+        [
+            {scheme: 'file',language: 'javascript'},
+            {scheme: 'file',language: 'javascriptreact'},
+            {scheme: 'file',language: 'typescript'},
+            {scheme: 'file',language: 'typescriptreact'},
+        ],
+        codeLensProvider
+    );
     context.subscriptions.push(
         outputChannel,
         scanWorkspaceCommand,
         goToBackendCommand,
-        findFrontendUsagesCommand
+        findFrontendUsagesCommand,
+        codeLensDisposable
     );
+
+    
 }
 
 
