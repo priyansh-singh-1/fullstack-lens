@@ -20,6 +20,12 @@ interface NavigationTarget {
     line: number;
 }
 
+interface BackendNavigationTarget {
+    type: 'rest'| 'websocket';
+    filePath: string,
+    line: number;
+}
+
 function sameFilePath(
     path1: string,
     path2: string
@@ -111,7 +117,7 @@ export function activate(context: vscode.ExtensionContext) {
                     if(currentCall){
                         const result= matches.find(
                             match =>
-                                match.call == currentCall
+                                match.call === currentCall
                         );
 
                         if(result?.endpoint){
@@ -193,6 +199,7 @@ export function activate(context: vscode.ExtensionContext) {
             {scheme: 'file',language: 'javascriptreact'},
             {scheme: 'file',language: 'typescript'},
             {scheme: 'file',language: 'typescriptreact'},
+            {scheme: 'file', language:'java'}
         ],
         codeLensProvider
     );
@@ -388,7 +395,7 @@ async function goToBackend(): Promise<void> {
 // FIND FRONTEND USAGES
 // ==========================================
 
-async function findFrontendUsages(): Promise<void> {
+async function findFrontendUsages(target?: BackendNavigationTarget): Promise<void> {
 
     const editor = vscode.window.activeTextEditor;
 
@@ -399,8 +406,8 @@ async function findFrontendUsages(): Promise<void> {
         return;
     }
 
-    const currentFile = editor.document.uri.fsPath;
-    const currentLine = editor.selection.active.line;
+    const currentFile =target?.filePath ?? editor.document.uri.fsPath;
+    const currentLine =target?.line ?? editor.selection.active.line;
 
     const files = await indexer.indexWorkspace();
 
@@ -414,8 +421,12 @@ async function findFrontendUsages(): Promise<void> {
 
     const currentEndpoint = endpoints.find(
         endpoint =>
-            endpoint.filePath === currentFile &&
-            Math.abs(endpoint.line - currentLine) <= 2
+            endpoint.filePath.toLowerCase() === currentFile.toLowerCase() &&
+            (
+                target?.type === 'rest' 
+                ? endpoint.line ===  currentLine
+                : Math.abs(endpoint.line - currentLine)<=2
+            )
     );
 
     if (currentEndpoint) {
@@ -485,10 +496,14 @@ async function findFrontendUsages(): Promise<void> {
     const currentWebSocketEndpoint =
         websocketEndpoints.find(
             endpoint =>
-                endpoint.filePath === currentFile &&
-                Math.abs(
-                    endpoint.line - currentLine
-                ) <= 2
+                endpoint.filePath.toLowerCase() === currentFile.toLowerCase() &&
+                (
+                    target?.type === 'websocket'
+                    ? endpoint.line === currentLine 
+                    : Math.abs(
+                        endpoint.line - currentLine
+                    )<=2
+                )
         );
 
     if (currentWebSocketEndpoint) {
