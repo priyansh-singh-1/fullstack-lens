@@ -11,7 +11,7 @@ export class WorkspaceIndexer{
 
         const frontendFiles= await vscode.workspace.findFiles(
             '**/*.{js,jsx,ts,tsx}',
-            '**/{node_modules,target,build,dist}'
+            '**/{node_modules,target,build,dist}/**'
         );
 
         const projectFiles: ProjectFile[]=[];

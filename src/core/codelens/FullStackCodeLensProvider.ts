@@ -1,31 +1,21 @@
 import * as vscode from 'vscode';
-import { WorkspaceIndexer } from '../workspace/WorkspaceIndexer';
-import { FrontendApiScanner } from '../parsing/frontend/FrontendApiScanner';
-import { FrontendWebSocketScanner } from '../parsing/frontend/FrontendWebSocketScanner';
-import { SpringEndpointScanner } from '../parsing/spring/SpringEndpointScanner';
-import { SpringWebSocketScanner } from '../parsing/spring/SpringWebSocketScanner';
-
-
-
+import { AnalysisService } from '../analysis/AnalysisService';
 
 
  export class FullStackCodeLensProvider implements vscode.CodeLensProvider{
 
-    private indexer=  new WorkspaceIndexer();
-
-    private frontendScanner= new FrontendApiScanner();
-
-    private frontendWebSocketScanner = new FrontendWebSocketScanner();
-
-    private springScanner= new SpringEndpointScanner();
-
-    private springWebsocketScanner = new SpringWebSocketScanner();
+    constructor(
+        private readonly analysisService: AnalysisService
+    ) {}
 
     
 
+   
     async provideCodeLenses(
         document: vscode.TextDocument
     ): Promise<vscode.CodeLens[]>{
+
+        const startTime = performance.now();
 
          console.log(
         'CODELENS CALLED:',
@@ -54,17 +44,31 @@ import { SpringWebSocketScanner } from '../parsing/spring/SpringWebSocketScanner
             return codeLenses;
         }
 
-        const files= await this.indexer.indexWorkspace();
+        console.log('[FSL] Requesting analysis');
 
-        const frontendCalls= this.frontendScanner.scan(files);
+const analysis =
+    await this.analysisService.getAnalysis();
 
-        const webSocketCalls= this.frontendWebSocketScanner.scan(files);
+console.log(
+    '[FSL] Analysis ready in',
+    Math.round(performance.now() - startTime),
+    'ms'
+);
 
-        const currentFile= document.uri.fsPath;
+        const frontendCalls =
+            analysis.restCalls;
+
+        const websocketCalls =
+            analysis.websocketCalls;
+
+        const currentFile =
+            document.uri.fsPath;
+
+        
 
         if(document.languageId === 'java'){
 
-            const endpoints= this.springScanner.scan(files);
+            const endpoints= analysis.restEndpoints;
 
             const endpointInCurrentFile= endpoints.filter(
                 endpoint => 
@@ -92,7 +96,7 @@ import { SpringWebSocketScanner } from '../parsing/spring/SpringWebSocketScanner
             new vscode.CodeLens(
                 range,
                 {
-                    title: `$(refrences) ${usages.length} Frontend Usagese${usages.length === 1 ? '' : 's'} ${endpoint.method} ${endpoint.path}`,
+                    title: `$(refrences) ${usages.length} Frontend Usage${usages.length === 1 ? '' : 's'} ${endpoint.method} ${endpoint.path}`,
                     command: 'fullstack-lens.findFrontendUsages',
 
                     arguments:[
@@ -108,7 +112,7 @@ import { SpringWebSocketScanner } from '../parsing/spring/SpringWebSocketScanner
                 );
             }
 
-            const websocketEndpoints= this.springWebsocketScanner.scan(files);
+            const websocketEndpoints= analysis.websocketEndpoints;
 
             const websocketEndpointsInCurrentFile= 
             websocketEndpoints.filter(
@@ -118,7 +122,7 @@ import { SpringWebSocketScanner } from '../parsing/spring/SpringWebSocketScanner
 
             for(const endpoint of websocketEndpointsInCurrentFile){
                 const usages= 
-                webSocketCalls.filter(
+                websocketCalls.filter(
                     call => 
                         call.type === 'publish' &&
                     call.destination === endpoint.inboundDestination
@@ -138,7 +142,7 @@ import { SpringWebSocketScanner } from '../parsing/spring/SpringWebSocketScanner
                     new vscode.CodeLens(
                         range,
                         {
-                            title: `$(refrences) ${usages.length} Frontend Usages${usages.length=== 1 ? '' : 's'} . Publish ${endpoint.inboundDestination}`,
+                            title: `$(refrences) ${usages.length} Frontend Usage${usages.length=== 1 ? '' : 's'} . Publish ${endpoint.inboundDestination}`,
 
                             command: 'fullstack-lens.findFrontendUsages',
 
@@ -151,7 +155,7 @@ import { SpringWebSocketScanner } from '../parsing/spring/SpringWebSocketScanner
                             ]
                         }
                     )
-                )
+                );
             }
             return codeLenses;
         }
@@ -193,7 +197,7 @@ import { SpringWebSocketScanner } from '../parsing/spring/SpringWebSocketScanner
             codeLenses.push(codeLens);
         }
 
-        const websocketCallsInCurrentFile =webSocketCalls.filter(
+        const websocketCallsInCurrentFile =websocketCalls.filter(
             call => 
                 call.filePath === currentFile
             &&

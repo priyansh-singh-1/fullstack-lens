@@ -10,6 +10,8 @@ import { FrontendWebSocketScanner } from './core/parsing/frontend/FrontendWebSoc
 import { WebSocketMatcher } from './core/matching/WebSocketMatcher';
 import { FullStackCodeLensProvider } from './core/codelens/FullStackCodeLensProvider';
 
+import { AnalysisService } from './core/analysis/AnalysisService';
+
 
 
 
@@ -46,6 +48,10 @@ const endpointMatcher = new EndpointMatcher();
 const springWebSocketScanner = new SpringWebSocketScanner();
 const frontendWebSocketScanner = new FrontendWebSocketScanner();
 const webSocketMatcher = new WebSocketMatcher();
+
+const analysisService = new AnalysisService();
+
+// Analysis is requested lazily by CodeLens, after activation has completed.
 
 
 // ==========================================
@@ -191,7 +197,7 @@ export function activate(context: vscode.ExtensionContext) {
             findFrontendUsages
         );
 
-        const codeLensProvider= new FullStackCodeLensProvider();
+        const codeLensProvider= new FullStackCodeLensProvider(analysisService);
 
     const codeLensDisposable = vscode.languages.registerCodeLensProvider(
         [
