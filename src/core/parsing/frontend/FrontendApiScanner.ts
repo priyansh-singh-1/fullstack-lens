@@ -197,15 +197,24 @@ export class FrontendApiScanner{
     }
 
     private normalizeUrl(url: string):string{
-        try{
-            const parsedUrl= new URL(url);
 
-            return parsedUrl.pathname;
+        // Convert JS template variables:
+        // ${id} -> {id}
+        // ${userId} -> {userId}
+        const normalizedTemplate = url.replace(
+        /\$\{([^}]+)\}/g,
+        '{$1}'
+        );
+
+        try{
+            const parsedUrl= new URL(normalizedTemplate);
+
+            return decodeURIComponent(parsedUrl.pathname);
         }catch{
-            if(!url.startsWith('/')){
-                return `/${url}`;
+            if(!normalizedTemplate.startsWith('/')){
+                return `/${normalizedTemplate}`;
             }
-            return url;
+            return normalizedTemplate;
         }
     }
     private escapeRegex(value: string): string{

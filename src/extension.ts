@@ -437,11 +437,14 @@ async function findFrontendUsages(target?: BackendNavigationTarget): Promise<voi
 
     if (currentEndpoint) {
 
-        const usages = frontendCalls.filter(
-            call =>
-                call.method === currentEndpoint.method &&
-                call.path === currentEndpoint.path
+        const matches= endpointMatcher.match(
+            frontendCalls,
+            [currentEndpoint]
         );
+
+        const usages= matches
+        .filter(result=> result.matched)
+        .map(result=> result.call);
 
         if (usages.length === 0) {
 

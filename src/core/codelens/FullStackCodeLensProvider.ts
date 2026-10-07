@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import { AnalysisService } from '../analysis/AnalysisService';
+import { EndpointMatcher } from '../matching/EndPointMatcher';
+
 
 
  export class FullStackCodeLensProvider implements vscode.CodeLensProvider{
@@ -77,11 +79,15 @@ console.log(
             );
 
             for(const endpoint of endpointInCurrentFile){
-                const usages= frontendCalls.filter(
-                    call => 
-                        call.method === endpoint.method &&
-                    call.path === endpoint.path
+                const endpointMatcher = new EndpointMatcher;
+                const matches= endpointMatcher.match(
+                    frontendCalls,
+                    [endpoint]
                 );
+
+                const usages= matches
+                    .filter(result => result.matched)
+                    .map(result=> result.call);
 
                 const position = new vscode.Position(
                     endpoint.line,0
@@ -96,7 +102,7 @@ console.log(
             new vscode.CodeLens(
                 range,
                 {
-                    title: `$(refrences) ${usages.length} Frontend Usage${usages.length === 1 ? '' : 's'} ${endpoint.method} ${endpoint.path}`,
+                    title: `$(references) ${usages.length} Frontend Usage${usages.length === 1 ? '' : 's'} ${endpoint.method} ${endpoint.path}`,
                     command: 'fullstack-lens.findFrontendUsages',
 
                     arguments:[
@@ -142,7 +148,7 @@ console.log(
                     new vscode.CodeLens(
                         range,
                         {
-                            title: `$(refrences) ${usages.length} Frontend Usage${usages.length=== 1 ? '' : 's'} . Publish ${endpoint.inboundDestination}`,
+                            title: `$(references) ${usages.length} Frontend Usage${usages.length=== 1 ? '' : 's'} . Publish ${endpoint.inboundDestination}`,
 
                             command: 'fullstack-lens.findFrontendUsages',
 
