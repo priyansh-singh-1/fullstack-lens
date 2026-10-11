@@ -1,10 +1,19 @@
 import * as vscode from 'vscode';
 import { AnalysisService } from '../analysis/AnalysisService';
-import { EndpointMatcher } from '../matching/EndPointMatcher';
 
 
 
- export class FullStackCodeLensProvider implements vscode.CodeLensProvider{
+ export class FullStackCodeLensProvider implements vscode.CodeLensProvider, vscode.Disposable{
+    private readonly changeEmitter = new vscode.EventEmitter<void>();
+    public readonly onDidChangeCodeLenses = this.changeEmitter.event;
+
+    public refresh(): void {
+        this.changeEmitter.fire();
+    }
+
+    public dispose(): void {
+        this.changeEmitter.dispose();
+    }
 
     constructor(
         private readonly analysisService: AnalysisService
@@ -57,9 +66,6 @@ console.log(
     'ms'
 );
 
-        const frontendCalls =
-            analysis.restCalls;
-
         const websocketCalls =
             analysis.websocketCalls;
 
@@ -79,15 +85,7 @@ console.log(
             );
 
             for(const endpoint of endpointInCurrentFile){
-                const endpointMatcher = new EndpointMatcher;
-                const matches= endpointMatcher.match(
-                    frontendCalls,
-                    [endpoint]
-                );
-
-                const usages= matches
-                    .filter(result => result.matched)
-                    .map(result=> result.call);
+                const usages = analysis.restUsages.get(endpoint) ?? [];
 
                 const position = new vscode.Position(
                     endpoint.line,0
@@ -108,6 +106,7 @@ console.log(
                     arguments:[
                         {
                             type:'rest',
+                            revision: analysis.revision,
                             filePath: endpoint.filePath,
                             line: endpoint.line
                         }
@@ -127,12 +126,7 @@ console.log(
             );
 
             for(const endpoint of websocketEndpointsInCurrentFile){
-                const usages= 
-                websocketCalls.filter(
-                    call => 
-                        call.type === 'publish' &&
-                    call.destination === endpoint.inboundDestination
-                );
+                const usages = analysis.websocketUsages.get(endpoint) ?? [];
 
                 const position = new vscode.Position(
                     endpoint.line,
@@ -155,6 +149,7 @@ console.log(
                             arguments: [
                                 {
                                     type: 'websocket',
+                                    revision: analysis.revision,
                                     filePath: endpoint.filePath,
                                     line: endpoint.line
                                 }
@@ -166,12 +161,12 @@ console.log(
             return codeLenses;
         }
 
-        const callsInCurrentFile= frontendCalls.filter(
-            call =>
-                 call.filePath === currentFile
+        const matchesInCurrentFile = analysis.restMatches.filter(
+            result => result.call.filePath === currentFile
         );
 
-        for(const call of callsInCurrentFile){
+        for (const matchResult of matchesInCurrentFile) {
+            const call = matchResult.call;
             const position = 
             new vscode.Position(
                 call.line,
@@ -183,15 +178,19 @@ console.log(
                 position
             );
 
+            const hasBackend= matchResult?.matched===true;
+
             const codeLens= 
             new vscode.CodeLens(
                 range,
                 {
-                    title: `→ Go to Backend · ${call.method} ${call.path}`,
+                    title: hasBackend
+                     ? `→ Go to Backend · ${call.method} ${call.path}` : `$(warning) No Backend Found · ${call.method} ${call.path}`,
                     command: `fullstack-lens.goToBackend`,
                     arguments:[
                         {
                             type: 'rest',
+                            revision: analysis.revision,
                         filePath:call.filePath,
                         line: call.line
                     }
@@ -230,6 +229,7 @@ console.log(
                         arguments: [
                             {
                                 type: 'websocket',
+                                revision: analysis.revision,
                                 filePath: call.filePath,
                                 line: call.line
                             }

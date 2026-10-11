@@ -1,16 +1,9 @@
 import * as vscode from 'vscode';
 
-import { WorkspaceIndexer } from './core/workspace/WorkspaceIndexer';
-import { SpringEndpointScanner } from './core/parsing/spring/SpringEndpointScanner';
-import { FrontendApiScanner } from './core/parsing/frontend/FrontendApiScanner';
-import { EndpointMatcher } from './core/matching/EndPointMatcher';
-
-import { SpringWebSocketScanner } from './core/parsing/spring/SpringWebSocketScanner';
-import { FrontendWebSocketScanner } from './core/parsing/frontend/FrontendWebSocketScanner';
-import { WebSocketMatcher } from './core/matching/WebSocketMatcher';
 import { FullStackCodeLensProvider } from './core/codelens/FullStackCodeLensProvider';
 
 import { AnalysisService } from './core/analysis/AnalysisService';
+import { registerAnalysisSaveRefresh } from './core/analysis/registerAnalysisSaveRefresh';
 
 
 
@@ -20,12 +13,14 @@ interface NavigationTarget {
     type: 'rest' | 'websocket';
     filePath: string;
     line: number;
+    revision?: number;
 }
 
 interface BackendNavigationTarget {
     type: 'rest'| 'websocket';
     filePath: string,
     line: number;
+    revision?: number;
 }
 
 function sameFilePath(
@@ -35,21 +30,29 @@ function sameFilePath(
     return path1.toLowerCase() === path2.toLowerCase();
 }
 
+function isStaleTarget(target: NavigationTarget | undefined, revision: number): boolean {
+    if (target && (typeof target.filePath !== 'string' || !target.filePath ||
+        !Number.isInteger(target.line) || target.line < 0 ||
+        (target.type !== 'rest' && target.type !== 'websocket'))) {
+        vscode.window.showWarningMessage('The CodeLens navigation target is unavailable.');
+        return true;
+    }
+    if (!analysisService.isCurrentRevision(revision) ||
+        (target?.revision !== undefined && target.revision !== revision)) {
+        vscode.window.showWarningMessage('This CodeLens is out of date. Wait for it to refresh and try again.');
+        return true;
+    }
+    return false;
+}
+
 // ==========================================
 // SHARED SERVICES
 // ==========================================
 
-const indexer = new WorkspaceIndexer();
-
-const springScanner = new SpringEndpointScanner();
-const frontendScanner = new FrontendApiScanner();
-const endpointMatcher = new EndpointMatcher();
-
-const springWebSocketScanner = new SpringWebSocketScanner();
-const frontendWebSocketScanner = new FrontendWebSocketScanner();
-const webSocketMatcher = new WebSocketMatcher();
-
 const analysisService = new AnalysisService();
+
+// Navigation commands reuse the cached snapshot; Scan Workspace forces refresh.
+// AnalysisService shares concurrent analysis requests with CodeLens.
 
 // Analysis is requested lazily by CodeLens, after activation has completed.
 
@@ -61,6 +64,7 @@ const analysisService = new AnalysisService();
 export function activate(context: vscode.ExtensionContext) {
 
     console.log('FullStack Lens is active');
+    const codeLensProvider = new FullStackCodeLensProvider(analysisService);
 
     const outputChannel =
         vscode.window.createOutputChannel('FullStack Lens');
@@ -68,7 +72,10 @@ export function activate(context: vscode.ExtensionContext) {
     const scanWorkspaceCommand =
         vscode.commands.registerCommand(
             'fullstack-lens.scanWorkspace',
-            () => scanWorkspace(outputChannel)
+            async () => {
+                await scanWorkspace(outputChannel);
+                codeLensProvider.refresh();
+            }
         );
 
     const goToBackendCommand =
@@ -91,7 +98,10 @@ export function activate(context: vscode.ExtensionContext) {
                 const currentLine= target?.line??
                 editor.selection.active.line;
 
-                const files= await indexer.indexWorkspace();
+                const analysis = await analysisService.getAnalysis();
+                if (isStaleTarget(target, analysis.revision)) {
+                    return;
+                }
 
                 console.log('TARGET:', target);
                 console.log('CURRENT FILE:', currentFile);
@@ -102,14 +112,8 @@ export function activate(context: vscode.ExtensionContext) {
                 // ==================================4
 
                 if(!target || target.type==='rest'){
-                    const endpoints= springScanner.scan(files);
-
-                    const frontendCall= frontendScanner.scan(files);
-
-                    const matches= endpointMatcher.match(
-                        frontendCall,
-                        endpoints
-                    );
+                    const frontendCall = analysis.restCalls;
+                    const matches = analysis.restMatches;
 
                     const currentCall= frontendCall.find(
                         call =>
@@ -129,14 +133,15 @@ export function activate(context: vscode.ExtensionContext) {
                         if(result?.endpoint){
                             await openAndHighlight(
                                 result.endpoint.filePath,
-                                result.endpoint.line
+                                result.endpoint.line,
+                                analysis.revision
                             );
                             return;
                         }
                     }
                 }
 
-                const frontendCall = frontendScanner.scan(files);
+                const frontendCall = analysis.restCalls;
                 console.log('REST CALLS:',
                     frontendCall.map(call => ({
                     path: call.path,
@@ -151,13 +156,8 @@ export function activate(context: vscode.ExtensionContext) {
 
                 if(!target || target.type==='websocket'){
 
-                    const webSocketEndpoints = springWebSocketScanner.scan(files);
-                    const webSocketCalls= frontendWebSocketScanner.scan(files);
-
-                    const websocketMatches= webSocketMatcher.match(
-                        webSocketCalls,
-                        webSocketEndpoints
-                    );
+                    const webSocketCalls = analysis.websocketCalls;
+                    const websocketMatches = analysis.websocketMatches;
 
                     const currentWebSocketCall= webSocketCalls.find(
                         call =>
@@ -175,7 +175,8 @@ export function activate(context: vscode.ExtensionContext) {
                         if(result?.endpoint){
                             await openAndHighlight(
                                 result.endpoint.filePath,
-                                result.endpoint.line
+                                result.endpoint.line,
+                                analysis.revision
                             );
 
                             return;
@@ -197,8 +198,6 @@ export function activate(context: vscode.ExtensionContext) {
             findFrontendUsages
         );
 
-        const codeLensProvider= new FullStackCodeLensProvider(analysisService);
-
     const codeLensDisposable = vscode.languages.registerCodeLensProvider(
         [
             {scheme: 'file',language: 'javascript'},
@@ -214,10 +213,13 @@ export function activate(context: vscode.ExtensionContext) {
         scanWorkspaceCommand,
         goToBackendCommand,
         findFrontendUsagesCommand,
-        codeLensDisposable
+        codeLensDisposable,
+        codeLensProvider,
+        registerAnalysisSaveRefresh(analysisService, codeLensProvider)
     );
 
-    
+    // Expose the same shared instances for extension integration tests/consumers.
+    return { analysisService, codeLensProvider };
 }
 
 
@@ -229,28 +231,15 @@ async function scanWorkspace(
     outputChannel: vscode.OutputChannel
 ): Promise<void> {
 
-    const files = await indexer.indexWorkspace();
-
-    // REST
-    const endpoints = springScanner.scan(files);
-    const frontendCalls = frontendScanner.scan(files);
-    const matches = endpointMatcher.match(
-        frontendCalls,
-        endpoints
-    );
-
-    // WebSocket
-    const websocketEndpoints =
-        springWebSocketScanner.scan(files);
-
-    const websocketCalls =
-        frontendWebSocketScanner.scan(files);
-
-    const websocketMatches =
-        webSocketMatcher.match(
-            websocketCalls,
-            websocketEndpoints
-        );
+    const {
+        files,
+        restEndpoints: endpoints,
+        restCalls: frontendCalls,
+        restMatches: matches,
+        websocketEndpoints,
+        websocketCalls,
+        websocketMatches
+    } = await analysisService.getAnalysis(true);
 
     outputChannel.clear();
 
@@ -310,20 +299,16 @@ async function goToBackend(): Promise<void> {
     const currentFile = editor.document.uri.fsPath;
     const currentLine = editor.selection.active.line;
 
-    const files = await indexer.indexWorkspace();
+    const analysis = await analysisService.getAnalysis(true);
 
 
     // ======================================
     // REST
     // ======================================
 
-    const endpoints = springScanner.scan(files);
-    const frontendCalls = frontendScanner.scan(files);
+    const frontendCalls = analysis.restCalls;
 
-    const matches = endpointMatcher.match(
-        frontendCalls,
-        endpoints
-    );
+    const matches = analysis.restMatches;
 
     const currentCall = frontendCalls.find(
         call =>
@@ -353,17 +338,9 @@ async function goToBackend(): Promise<void> {
     // WEBSOCKET
     // ======================================
 
-    const websocketEndpoints =
-        springWebSocketScanner.scan(files);
+    const websocketCalls = analysis.websocketCalls;
 
-    const websocketCalls =
-        frontendWebSocketScanner.scan(files);
-
-    const websocketMatches =
-        webSocketMatcher.match(
-            websocketCalls,
-            websocketEndpoints
-        );
+    const websocketMatches = analysis.websocketMatches;
 
     const currentWebSocketCall =
         websocketCalls.find(
@@ -415,17 +392,19 @@ async function findFrontendUsages(target?: BackendNavigationTarget): Promise<voi
     const currentFile =target?.filePath ?? editor.document.uri.fsPath;
     const currentLine =target?.line ?? editor.selection.active.line;
 
-    const files = await indexer.indexWorkspace();
+    const analysis = await analysisService.getAnalysis();
+    if (isStaleTarget(target, analysis.revision)) {
+        return;
+    }
 
 
     // ======================================
     // REST
     // ======================================
 
-    const endpoints = springScanner.scan(files);
-    const frontendCalls = frontendScanner.scan(files);
+    const endpoints = analysis.restEndpoints;
 
-    const currentEndpoint = endpoints.find(
+    const currentEndpoint = target?.type === 'websocket' ? undefined : endpoints.find(
         endpoint =>
             endpoint.filePath.toLowerCase() === currentFile.toLowerCase() &&
             (
@@ -437,14 +416,7 @@ async function findFrontendUsages(target?: BackendNavigationTarget): Promise<voi
 
     if (currentEndpoint) {
 
-        const matches= endpointMatcher.match(
-            frontendCalls,
-            [currentEndpoint]
-        );
-
-        const usages= matches
-        .filter(result=> result.matched)
-        .map(result=> result.call);
+        const usages = analysis.restUsages.get(currentEndpoint) ?? [];
 
         if (usages.length === 0) {
 
@@ -459,7 +431,8 @@ async function findFrontendUsages(target?: BackendNavigationTarget): Promise<voi
 
             await openAndHighlight(
                 usages[0].filePath,
-                usages[0].line
+                usages[0].line,
+                analysis.revision
             );
 
             return;
@@ -485,7 +458,8 @@ async function findFrontendUsages(target?: BackendNavigationTarget): Promise<voi
 
         await openAndHighlight(
             selected.call.filePath,
-            selected.call.line
+            selected.call.line,
+            analysis.revision
         );
 
         return;
@@ -496,14 +470,10 @@ async function findFrontendUsages(target?: BackendNavigationTarget): Promise<voi
     // WEBSOCKET
     // ======================================
 
-    const websocketEndpoints =
-        springWebSocketScanner.scan(files);
-
-    const websocketCalls =
-        frontendWebSocketScanner.scan(files);
+    const websocketEndpoints = analysis.websocketEndpoints;
 
     const currentWebSocketEndpoint =
-        websocketEndpoints.find(
+        target?.type === 'rest' ? undefined : websocketEndpoints.find(
             endpoint =>
                 endpoint.filePath.toLowerCase() === currentFile.toLowerCase() &&
                 (
@@ -517,12 +487,7 @@ async function findFrontendUsages(target?: BackendNavigationTarget): Promise<voi
 
     if (currentWebSocketEndpoint) {
 
-        const usages = websocketCalls.filter(
-            call =>
-                call.type === 'publish' &&
-                call.destination ===
-                    currentWebSocketEndpoint.inboundDestination
-        );
+        const usages = analysis.websocketUsages.get(currentWebSocketEndpoint) ?? [];
 
         if (usages.length === 0) {
 
@@ -537,7 +502,8 @@ async function findFrontendUsages(target?: BackendNavigationTarget): Promise<voi
 
             await openAndHighlight(
                 usages[0].filePath,
-                usages[0].line
+                usages[0].line,
+                analysis.revision
             );
 
             return;
@@ -564,7 +530,8 @@ async function findFrontendUsages(target?: BackendNavigationTarget): Promise<voi
 
         await openAndHighlight(
             selected.call.filePath,
-            selected.call.line
+            selected.call.line,
+            analysis.revision
         );
 
         return;
@@ -832,53 +799,44 @@ function showScanSummary(files: any[]): void {
 
 async function openAndHighlight(
     filePath: string,
-    line: number
+    line: number,
+    revision?: number
 ): Promise<void> {
+    try {
+        if (revision !== undefined && isStaleTarget(undefined, revision)) {
+            return;
+        }
+        const uri = vscode.Uri.file(filePath);
+        const document = await vscode.workspace.openTextDocument(uri);
 
-    const uri = vscode.Uri.file(filePath);
+        if (!Number.isInteger(line) || line < 0 || line >= document.lineCount) {
+            vscode.window.showWarningMessage('The navigation target has moved or is unavailable. Save and refresh CodeLens.');
+            return;
+        }
+        if (revision !== undefined && isStaleTarget(undefined, revision)) {
+            return;
+        }
 
-    const document =
-        await vscode.workspace.openTextDocument(uri);
+        const editor = await vscode.window.showTextDocument(document);
+        if (revision !== undefined && isStaleTarget(undefined, revision)) {
+            return;
+        }
 
-    const editor =
-        await vscode.window.showTextDocument(document);
+        const lineText = document.lineAt(line);
+        const range = new vscode.Range(line, 0, line, lineText.text.length);
+        editor.selection = new vscode.Selection(range.start, range.end);
+        editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
 
-    const lineText = document.lineAt(line);
-
-    const range = new vscode.Range(
-        line,
-        0,
-        line,
-        lineText.text.length
-    );
-
-    editor.selection =
-        new vscode.Selection(
-            range.start,
-            range.end
-        );
-
-    editor.revealRange(
-        range,
-        vscode.TextEditorRevealType.InCenter
-    );
-
-    const decoration =
-        vscode.window.createTextEditorDecorationType({
-            backgroundColor:
-                'rgba(255, 215, 0, 0.25)',
+        const decoration = vscode.window.createTextEditorDecorationType({
+            backgroundColor: 'rgba(255, 215, 0, 0.25)',
             isWholeLine: true
         });
-
-    editor.setDecorations(
-        decoration,
-        [range]
-    );
-
-    setTimeout(
-        () => decoration.dispose(),
-        2000
-    );
+        editor.setDecorations(decoration, [range]);
+        setTimeout(() => decoration.dispose(), 2000);
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        vscode.window.showWarningMessage(`Unable to open the navigation target: ${message}`);
+    }
 }
 
 

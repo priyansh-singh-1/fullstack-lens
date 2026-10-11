@@ -1,9 +1,6 @@
-import { calcChildStagger } from 'framer-motion';
 import { WebSocketCall } from '../models/WebSocketCall';
 import { WebSocketEndpoint } from '../models/WebSocketEndpoint';
 import { WebSocketMatchResult } from '../models/WebSocketMatchResult';
-import { SpringEndpointScanner } from '../parsing/spring/SpringEndpointScanner';
-import { resourceLimits } from 'node:worker_threads';
 
 
 export class WebSocketMatcher{
@@ -11,20 +8,33 @@ export class WebSocketMatcher{
     public match(
         calls: WebSocketCall[],
         endpoints: WebSocketEndpoint[],
+        usages?: Map<WebSocketEndpoint, WebSocketCall[]>,
 
     ): WebSocketMatchResult[]{
 
         const results: WebSocketMatchResult[]=[];
 
-        const publishCalls= calls.filter(
-            call => call.type==='publish'
-        );
-
-        for(const call of publishCalls){
-            const endpoint = endpoints.find(
-                endpoint => 
-                    endpoint.inboundDestination === call.destination
-            );
+        const callsByDestination = new Map<string, WebSocketCall[]>();
+        for (const call of calls) {
+            if (call.type !== 'publish') {
+                continue;
+            }
+            const destinationCalls = callsByDestination.get(call.destination) ?? [];
+            destinationCalls.push(call);
+            callsByDestination.set(call.destination, destinationCalls);
+        }
+        const firstEndpointByDestination = new Map<string, WebSocketEndpoint>();
+        for (const endpoint of endpoints) {
+            if (!firstEndpointByDestination.has(endpoint.inboundDestination)) {
+                firstEndpointByDestination.set(endpoint.inboundDestination, endpoint);
+            }
+            usages?.set(endpoint, callsByDestination.get(endpoint.inboundDestination) ?? []);
+        }
+        for (const call of calls) {
+            if (call.type !== 'publish') {
+                continue;
+            }
+            const endpoint = firstEndpointByDestination.get(call.destination);
 
             results.push({
                 call,

@@ -36,18 +36,30 @@ export class EndpointMatcher {
 
     public match(
         calls: HttpCall[],
-        endpoints: HttpEndpoint[]
+        endpoints: HttpEndpoint[],
+        // Collect every compatible endpoint for reverse navigation, while
+        // keeping the first endpoint as the frontend navigation target.
+        usages?: Map<HttpEndpoint, HttpCall[]>
     ): MatchResult[] {
 
         const results: MatchResult[] = [];
 
         for (const call of calls) {
 
-            const endpoint = endpoints.find(
-                endpoint =>
-                    endpoint.method === call.method &&
-                    this.pathMatch(call.path,endpoint.path)
-            );
+            let endpoint: HttpEndpoint | undefined;
+            for (const candidate of endpoints) {
+                if (candidate.method !== call.method ||
+                    !this.pathMatch(call.path, candidate.path)) {
+                    continue;
+                }
+                endpoint ??= candidate;
+                if (!usages) {
+                    break;
+                }
+                const callsForEndpoint = usages.get(candidate) ?? [];
+                callsForEndpoint.push(call);
+                usages.set(candidate, callsForEndpoint);
+            }
 
             if (endpoint) {
                 results.push({
