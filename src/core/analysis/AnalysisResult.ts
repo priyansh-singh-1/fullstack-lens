@@ -5,6 +5,9 @@ import { HttpCall } from '../models/HttpCall';
 import { HttpEndpoint } from '../models/HttpEndpoint';
 import { WebSocketCall } from '../models/WebSocketCall';
 import { WebSocketEndpoint } from '../models/WebSocketEndpoint';
+import { AnalysisDiagnostic } from '../models/AnalysisDiagnostic';
+
+
 
 
 export interface AnalysisResult{
@@ -22,6 +25,7 @@ export interface AnalysisResult{
     websocketCalls: WebSocketCall[];
     websocketMatches: WebSocketMatchResult[];
     websocketUsages: Map<WebSocketEndpoint, WebSocketCall[]>;
+    diagnostics: AnalysisDiagnostic[];
 
     
 

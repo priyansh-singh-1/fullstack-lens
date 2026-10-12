@@ -18,6 +18,7 @@ function snapshot(revision: number): AnalysisResult {
     return {
         revision, files: [], restEndpoints: [], restCalls: [], restMatches: [], restUsages: new Map(),
         websocketEndpoints: [], websocketCalls: [], websocketMatches: [], websocketUsages: new Map(),
+        diagnostics: [],
     };
 }
 // Gate scan completion without changing scanners or exposing test-only service APIs.

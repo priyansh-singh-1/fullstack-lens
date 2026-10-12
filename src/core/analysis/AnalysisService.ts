@@ -6,6 +6,8 @@ import { SpringWebSocketScanner } from '../parsing/spring/SpringWebSocketScanner
 import { FrontendApiScanner } from '../parsing/frontend/FrontendApiScanner';
 import { FrontendWebSocketScanner } from '../parsing/frontend/FrontendWebSocketScanner';
 import { AnalysisResult } from './AnalysisResult';
+import { RestDiagnosticAnalyzer } from './RestDiagnosticAnalyzer';
+
 
 
 export class AnalysisService{
@@ -18,6 +20,8 @@ export class AnalysisService{
     private frontendWebSocketScanner = new FrontendWebSocketScanner();
 
     private springwebsocketScanner= new SpringWebSocketScanner();
+
+    private restDiagnosticAnalyzer = new RestDiagnosticAnalyzer();
 
     private cachedResult: AnalysisResult | undefined;
 
@@ -109,6 +113,8 @@ export class AnalysisService{
         const websocketCalls =
             this.frontendWebSocketScanner.scan(files);
 
+        
+
 
         console.log(`[FSL] WebSocket scanning: ${Math.round(performance.now() - stageStart)} ms`);
         stageStart = performance.now();
@@ -119,6 +125,8 @@ export class AnalysisService{
         const websocketMatches = new WebSocketMatcher().match(
             websocketCalls, websocketEndpoints, websocketUsages
         );
+
+        const diagnostics = this.restDiagnosticAnalyzer.analyze(restMatches);
         console.log(`[FSL] Matching: ${Math.round(performance.now() - stageStart)} ms`);
 
         //4. Create analysis snapshot
@@ -132,7 +140,9 @@ export class AnalysisService{
             websocketEndpoints,
             websocketCalls,
             websocketMatches,
-            websocketUsages
+            websocketUsages,
+            
+            diagnostics
         };
 
         console.log(`[FSL] Total analysis: ${Math.round(performance.now() - start)} ms`);

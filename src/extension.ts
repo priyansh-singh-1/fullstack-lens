@@ -4,6 +4,8 @@ import { FullStackCodeLensProvider } from './core/codelens/FullStackCodeLensProv
 
 import { AnalysisService } from './core/analysis/AnalysisService';
 import { registerAnalysisSaveRefresh } from './core/analysis/registerAnalysisSaveRefresh';
+import { FullStackDiagnosticManager } from './core/diagnostics/FullStackDiagnosticManager';
+
 
 
 
@@ -54,26 +56,32 @@ const analysisService = new AnalysisService();
 // Navigation commands reuse the cached snapshot; Scan Workspace forces refresh.
 // AnalysisService shares concurrent analysis requests with CodeLens.
 
-// Analysis is requested lazily by CodeLens, after activation has completed.
+// Activation publishes initial diagnostics from the shared analysis snapshot.
 
 
 // ==========================================
 // EXTENSION ACTIVATION
 // ==========================================
 
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext) {
 
     console.log('FullStack Lens is active');
     const codeLensProvider = new FullStackCodeLensProvider(analysisService);
 
+    const diagnosticManager = new FullStackDiagnosticManager();
+
+    context.subscriptions.push(diagnosticManager);
+
     const outputChannel =
         vscode.window.createOutputChannel('FullStack Lens');
+
+    
 
     const scanWorkspaceCommand =
         vscode.commands.registerCommand(
             'fullstack-lens.scanWorkspace',
             async () => {
-                await scanWorkspace(outputChannel);
+                await scanWorkspace(outputChannel, diagnosticManager);
                 codeLensProvider.refresh();
             }
         );
@@ -208,6 +216,11 @@ export function activate(context: vscode.ExtensionContext) {
         ],
         codeLensProvider
     );
+    const refreshDiagnostics = async () => {
+        const analysis = await analysisService.getAnalysis();
+        diagnosticManager.update(analysis.diagnostics);
+    };
+
     context.subscriptions.push(
         outputChannel,
         scanWorkspaceCommand,
@@ -217,6 +230,8 @@ export function activate(context: vscode.ExtensionContext) {
         codeLensProvider,
         registerAnalysisSaveRefresh(analysisService, codeLensProvider)
     );
+
+    await refreshDiagnostics();
 
     // Expose the same shared instances for extension integration tests/consumers.
     return { analysisService, codeLensProvider };
@@ -228,8 +243,12 @@ export function activate(context: vscode.ExtensionContext) {
 // ==========================================
 
 async function scanWorkspace(
-    outputChannel: vscode.OutputChannel
+    outputChannel: vscode.OutputChannel,
+    diagnosticManager: FullStackDiagnosticManager
 ): Promise<void> {
+
+    const analysis = await analysisService.getAnalysis(true);
+    diagnosticManager.update(analysis.diagnostics);
 
     const {
         files,
@@ -239,7 +258,7 @@ async function scanWorkspace(
         websocketEndpoints,
         websocketCalls,
         websocketMatches
-    } = await analysisService.getAnalysis(true);
+    } = analysis;
 
     outputChannel.clear();
 
