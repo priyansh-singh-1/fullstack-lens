@@ -3,6 +3,7 @@ import { AnalysisService } from '../analysis/AnalysisService';
 
 
 
+
  export class FullStackCodeLensProvider implements vscode.CodeLensProvider, vscode.Disposable{
     private readonly changeEmitter = new vscode.EventEmitter<void>();
     public readonly onDidChangeCodeLenses = this.changeEmitter.event;
@@ -180,17 +181,32 @@ console.log(
 
             const hasBackend= matchResult?.matched===true;
 
+            const isAmbiguous = hasBackend && (matchResult.candidateEndpoints?.length ?? 0) > 1;
+            const hasMethodMismatch = !hasBackend && analysis.diagnostics.some(diagnostic =>
+                diagnostic.code === 'FSL002' && diagnostic.filePath === call.filePath &&
+                diagnostic.line === call.line
+            );
+
             const codeLens= 
             new vscode.CodeLens(
                 range,
                 {
-                    title: hasBackend
-                     ? `→ Go to Backend · ${call.method} ${call.path}` : `$(warning) No Backend Found · ${call.method} ${call.path}`,
-                    command: `fullstack-lens.goToBackend`,
+                    title: isAmbiguous
+                        ? `$(warning) Ambiguous Route · ${call.method} ${call.path}`
+                        : hasBackend
+                        ? `→ Go to Backend · ${call.method} ${call.path}`
+                        : hasMethodMismatch
+                            ? `$(warning) Method Mismatch · ${call.method} ${call.path}`
+                            : `$(warning) No Backend Found · ${call.method} ${call.path}`,
+                    command: isAmbiguous
+                        ? 'fullstack-lens.selectBackendEndpoint'
+                        : 'fullstack-lens.goToBackend',
                     arguments:[
                         {
                             type: 'rest',
                             revision: analysis.revision,
+                            method: call.method,
+                            path: call.path,
                         filePath:call.filePath,
                         line: call.line
                     }

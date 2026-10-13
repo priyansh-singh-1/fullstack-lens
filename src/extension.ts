@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
+import { MatchResult } from './core/models/MatchResult';
 
 import { FullStackCodeLensProvider } from './core/codelens/FullStackCodeLensProvider';
 
@@ -16,6 +18,8 @@ interface NavigationTarget {
     filePath: string;
     line: number;
     revision?: number;
+    method?: string;
+    path?: string;
 }
 
 interface BackendNavigationTarget {
@@ -127,6 +131,8 @@ export async function activate(context: vscode.ExtensionContext) {
                         call =>
                             sameFilePath(call.filePath, currentFile) &&
                         call.line===currentLine
+                        && (target?.method === undefined || target.method === call.method)
+                        && (target?.path === undefined || target.path === call.path)
                         
                     );
 
@@ -138,12 +144,8 @@ export async function activate(context: vscode.ExtensionContext) {
                                 match.call === currentCall
                         );
 
-                        if(result?.endpoint){
-                            await openAndHighlight(
-                                result.endpoint.filePath,
-                                result.endpoint.line,
-                                analysis.revision
-                            );
+                        if(result?.matched){
+                            await navigateRestMatch(result, analysis.revision);
                             return;
                         }
                     }
@@ -206,6 +208,28 @@ export async function activate(context: vscode.ExtensionContext) {
             findFrontendUsages
         );
 
+    const selectBackendEndpointCommand = vscode.commands.registerCommand(
+        'fullstack-lens.selectBackendEndpoint',
+        async (target?: NavigationTarget) => {
+            if (!target || target.type !== 'rest' || !Number.isInteger(target.revision) ||
+                typeof target.method !== 'string' || typeof target.path !== 'string') {
+                vscode.window.showWarningMessage('The CodeLens navigation target is unavailable.');
+                return;
+            }
+            const analysis = await analysisService.getAnalysis();
+            if (isStaleTarget(target, analysis.revision)) { return; }
+            const result = analysis.restMatches.find(match =>
+                sameFilePath(match.call.filePath, target.filePath) && match.call.line === target.line &&
+                match.call.method === target.method && match.call.path === target.path
+            );
+            if (!result?.matched) {
+                vscode.window.showWarningMessage('No matching REST backend endpoint found. Refresh CodeLens and try again.');
+                return;
+            }
+            await navigateRestMatch(result, analysis.revision);
+        }
+    );
+
     const codeLensDisposable = vscode.languages.registerCodeLensProvider(
         [
             {scheme: 'file',language: 'javascript'},
@@ -225,6 +249,7 @@ export async function activate(context: vscode.ExtensionContext) {
         outputChannel,
         scanWorkspaceCommand,
         goToBackendCommand,
+        selectBackendEndpointCommand,
         findFrontendUsagesCommand,
         codeLensDisposable,
         codeLensProvider,
@@ -341,12 +366,8 @@ async function goToBackend(): Promise<void> {
             match => match.call === currentCall
         );
 
-        if (result?.endpoint) {
-
-            await openAndHighlight(
-                result.endpoint.filePath,
-                result.endpoint.line
-            );
+        if (result?.matched) {
+            await navigateRestMatch(result, analysis.revision);
 
             return;
         }
@@ -815,6 +836,32 @@ function showScanSummary(files: any[]): void {
 // ==========================================
 // NAVIGATION
 // ==========================================
+
+async function navigateRestMatch(result: MatchResult, revision: number): Promise<void> {
+    if (isStaleTarget(undefined, revision)) { return; }
+    const candidates = result.candidateEndpoints ?? (result.endpoint ? [result.endpoint] : []);
+    if (candidates.length === 0) {
+        vscode.window.showWarningMessage('No matching REST backend endpoint found.');
+        return;
+    }
+    let endpoint = candidates[0];
+    if (candidates.length > 1) {
+        const selected = await vscode.window.showQuickPick(
+            candidates.map(candidate => ({
+                label: `${path.basename(candidate.filePath)} — ${candidate.method} ${candidate.path}`,
+                description: `${vscode.workspace.asRelativePath(candidate.filePath)} : ${candidate.line + 1}`,
+                endpoint: candidate
+            })),
+            {
+                placeHolder: `Select backend endpoint for ${result.call.method} ${result.call.path}`,
+                matchOnDescription: true
+            }
+        );
+        if (!selected || isStaleTarget(undefined, revision)) { return; }
+        endpoint = selected.endpoint;
+    }
+    await openAndHighlight(endpoint.filePath, endpoint.line, revision);
+}
 
 async function openAndHighlight(
     filePath: string,

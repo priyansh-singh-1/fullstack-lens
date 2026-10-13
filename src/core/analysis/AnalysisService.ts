@@ -126,7 +126,7 @@ export class AnalysisService{
             websocketCalls, websocketEndpoints, websocketUsages
         );
 
-        const diagnostics = this.restDiagnosticAnalyzer.analyze(restMatches);
+        const diagnostics = this.restDiagnosticAnalyzer.analyze(restMatches,restEndpoints);
         console.log(`[FSL] Matching: ${Math.round(performance.now() - stageStart)} ms`);
 
         //4. Create analysis snapshot

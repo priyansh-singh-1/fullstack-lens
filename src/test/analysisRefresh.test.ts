@@ -325,6 +325,118 @@ suite('Navigation and saved endpoint changes', () => {
         assert.strictEqual(vscode.window.activeTextEditor?.selection.active.line, line);
     }
 
+    type BackendPick = vscode.QuickPickItem & { endpoint: { filePath: string; line: number; path: string } };
+    async function withBackendPick(
+        pick: (items: BackendPick[]) => Promise<BackendPick | undefined>,
+        action: () => Promise<void>
+    ) {
+        const original = vscode.window.showQuickPick;
+        vscode.window.showQuickPick = (async (items: BackendPick[]) => pick(items)) as unknown as typeof original;
+        try { await action(); } finally { vscode.window.showQuickPick = original; }
+    }
+
+    test('ambiguous lens resolves all best candidates and selection opens the exact file and line', async () => {
+        const other = await document('OtherController.java', '\n\n@RestController\n@RequestMapping("/api")\n' +
+            'class OtherController {\n@GetMapping("/users/{userId}")\nvoid user() {}\n}\n');
+        try {
+            const analysis = await api.analysisService.getAnalysis(true);
+            const forward = await lens(frontend, 'rest', '/api/users/{id}');
+            assert.ok(forward.command!.title.includes('Ambiguous Route'));
+            assert.strictEqual(forward.command!.command, 'fullstack-lens.selectBackendEndpoint');
+            assert.deepStrictEqual(forward.command!.arguments, [{
+                type: 'rest', revision: analysis.revision, method: 'GET', path: '/api/users/{id}',
+                filePath: frontend.uri.fsPath, line: 1
+            }]);
+            assert.ok(analysis.diagnostics.some(d => d.filePath === frontend.uri.fsPath && d.code === 'FSL003'));
+            const candidates = analysis.restMatches.find(m => m.call.filePath === frontend.uri.fsPath &&
+                m.call.line === 1)!.candidateEndpoints!;
+            assert.strictEqual(candidates.length, 2);
+            let picks = 0;
+            await withBackendPick(async items => {
+                picks++;
+                assert.deepStrictEqual(items.map(item => item.endpoint), candidates);
+                assert.ok(items.every(item => item.label.includes('GET /api/users/') &&
+                    item.description?.includes(`${item.endpoint.line + 1}`)));
+                return items.find(item => item.endpoint.filePath === other.uri.fsPath);
+            }, async () => {
+                await vscode.window.showTextDocument(frontend);
+                await execute(forward);
+                assertEditor(other, 5);
+                // The normal command must also guard against first-match navigation.
+                await vscode.commands.executeCommand('fullstack-lens.goToBackend', ...forward.command!.arguments!);
+                assertEditor(other, 5);
+            });
+            assert.strictEqual(picks, 2);
+            assert.strictEqual(await api.analysisService.getAnalysis(), analysis);
+        } finally { await save(other, '// removed endpoint\n'); }
+    });
+
+    test('ambiguous cancellation and a save while Quick Pick is open never navigate', async () => {
+        const ambiguous = java.replace('void user() {}', 'void user() {}\n@GetMapping("/users/{userId}")\nvoid other() {}');
+        await save(backend, ambiguous);
+        const forward = await lens(frontend, 'rest', '/api/users/{id}');
+        await vscode.window.showTextDocument(frontend);
+        const originalLine = vscode.window.activeTextEditor!.selection.active.line;
+        await withBackendPick(async () => undefined, async () => {
+            await execute(forward); assertEditor(frontend, originalLine);
+        });
+        await withBackendPick(async items => {
+            await save(backend, '\n' + ambiguous);
+            return items[1];
+        }, async () => {
+            await execute(forward);
+            assert.strictEqual(vscode.window.activeTextEditor?.document.uri.fsPath, frontend.uri.fsPath);
+        });
+    });
+
+    test('saving away ambiguity rejects old payload and fresh selection command navigates directly', async () => {
+        await save(backend, java.replace('void user() {}',
+            'void user() {}\n@GetMapping("/users/{userId}")\nvoid other() {}'));
+        const old = await lens(frontend, 'rest', '/api/users/{id}');
+        const refreshed = deferred<void>();
+        const listener = api.codeLensProvider.onDidChangeCodeLenses(() => refreshed.resolve());
+        try {
+            await save(backend, java);
+            await refreshed.promise;
+            const fresh = await lens(frontend, 'rest', '/api/users/{id}');
+            assert.ok(fresh.command!.title.includes('Go to Backend'));
+            assert.strictEqual(fresh.command!.command, 'fullstack-lens.goToBackend');
+            await vscode.window.showTextDocument(frontend);
+            await withBackendPick(async () => { assert.fail('Resolved/stale routes must not show Quick Pick'); }, async () => {
+                await execute(old);
+                assert.strictEqual(vscode.window.activeTextEditor?.document.uri.fsPath, frontend.uri.fsPath);
+                await vscode.commands.executeCommand('fullstack-lens.selectBackendEndpoint', ...fresh.command!.arguments!);
+                assertEditor(backend, 3);
+            });
+        } finally { listener.dispose(); }
+    });
+
+    test('ambiguous command rejects malformed and missing current targets safely', async () => {
+        await vscode.window.showTextDocument(frontend);
+        const current = await api.analysisService.getAnalysis();
+        await withBackendPick(async () => { assert.fail('Invalid targets must not show Quick Pick'); }, async () => {
+            for (const target of [undefined, { type: 'rest', filePath: 42, line: -1, revision: current.revision,
+                method: 'GET', path: '/api/users/{id}' }, { type: 'rest', filePath: frontend.uri.fsPath,
+                line: 9999, revision: current.revision, method: 'GET', path: '/api/users/{id}' }]) {
+                await vscode.commands.executeCommand('fullstack-lens.selectBackendEndpoint', target);
+            }
+        });
+        assert.strictEqual(vscode.window.activeTextEditor?.document.uri.fsPath, frontend.uri.fsPath);
+    });
+
+    test('missing and method-mismatched routes keep their titles and diagnostic codes', async () => {
+        await save(frontend, 'axios.get("/api/missing");\naxios.post("/api/users/123");\n');
+        const missing = await lens(frontend, 'rest', '/api/missing');
+        const mismatch = await lens(frontend, 'rest', '/api/users/123');
+        assert.ok(missing.command!.title.includes('No Backend Found'));
+        assert.ok(mismatch.command!.title.includes('Method Mismatch'));
+        assert.strictEqual(missing.command!.command, 'fullstack-lens.goToBackend');
+        assert.strictEqual(mismatch.command!.command, 'fullstack-lens.goToBackend');
+        const analysis = await api.analysisService.getAnalysis();
+        assert.deepStrictEqual(analysis.diagnostics.filter(d => d.filePath === frontend.uri.fsPath)
+            .map(d => d.code), ['FSL001', 'FSL002']);
+    });
+
     test('dynamic REST, usage counts, unmatched lenses and bidirectional navigation survive', async () => {
         const cached = await api.analysisService.getAnalysis();
         const forward = await lens(frontend, 'rest', '/api/users/{id}');
@@ -376,6 +488,53 @@ suite('Navigation and saved endpoint changes', () => {
         const endpoint = analysis.restEndpoints.find(item => item.path === '/api/users/{id}');
         assert.ok(endpoint);
         assert.strictEqual(analysis.restUsages.get(endpoint)?.length, 2);
+    });
+
+    test('specific routes drive precomputed usages, CodeLens and navigation after saves', async () => {
+        const routes = '@RestController\n@RequestMapping("/api/chat")\nclass Controller {\n' +
+            '@GetMapping("/{userId}")\nvoid user() {}\n' +
+            '@GetMapping("/history")\nvoid history() {}\n' +
+            '@GetMapping("/pending")\nvoid pending() {}\n}\n';
+        await save(backend, routes);
+        await save(frontend, 'axios.get("/api/chat/history");\n' +
+            'axios.get("/api/chat/history");\naxios.get("/api/chat/pending");\n');
+        const analysis = await api.analysisService.getAnalysis();
+        const counts = analysis.restEndpoints.filter(item => item.filePath === backend.uri.fsPath)
+            .map(item => [item.path, analysis.restUsages.get(item)?.length ?? 0]);
+        assert.deepStrictEqual(counts, [
+            ['/api/chat/{userId}', 0], ['/api/chat/history', 2], ['/api/chat/pending', 1]
+        ]);
+        assert.ok(analysis.restMatches.filter(item => item.call.filePath === frontend.uri.fsPath)
+            .every(item => item.candidateEndpoints?.length === 1));
+        assert.ok(!analysis.diagnostics.some(item => item.filePath === frontend.uri.fsPath));
+        assert.ok((await lens(backend, 'rest', '/api/chat/{userId}'))
+            .command!.title.includes('0 Frontend Usages'));
+        assert.ok((await lens(backend, 'rest', '/api/chat/history'))
+            .command!.title.includes('2 Frontend Usages'));
+        const forward = await lens(frontend, 'rest', '/api/chat/pending');
+        const reverse = await lens(backend, 'rest', '/api/chat/pending');
+        await vscode.window.showTextDocument(frontend);
+        await execute(forward); assertEditor(backend, 7);
+        await execute(reverse); assertEditor(frontend, 2);
+        assert.strictEqual(await api.analysisService.getAnalysis(), analysis);
+
+        const refreshed = deferred<void>();
+        const listener = api.codeLensProvider.onDidChangeCodeLenses(() => refreshed.resolve());
+        try {
+            // Removing a static route must move its calls to the dynamic fallback.
+            await save(backend, routes.replace('@GetMapping("/history")\nvoid history() {}\n', ''));
+            await refreshed.promise;
+            const fresh = await api.analysisService.getAnalysis();
+            assert.notStrictEqual(fresh, analysis);
+            const dynamic = fresh.restEndpoints.find(item => item.filePath === backend.uri.fsPath &&
+                item.path === '/api/chat/{userId}');
+            assert.ok(dynamic);
+            assert.strictEqual(fresh.restUsages.get(dynamic)?.length, 2);
+            assert.ok((await lens(backend, 'rest', dynamic.path))
+                .command!.title.includes('2 Frontend Usages'));
+            await execute(await lens(frontend, 'rest', '/api/chat/history'));
+            assertEditor(backend, 3);
+        } finally { listener.dispose(); }
     });
 
     test('explicit workspace scan replaces the cache and emits a refresh', async () => {

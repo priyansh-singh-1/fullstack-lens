@@ -4,13 +4,30 @@ import { MatchResult } from '../models/MatchResult';
 
 export class EndpointMatcher {
 
-    private pathMatch(
+    private normalizePath(path: string): string {
+        return path.length > 1 && path.endsWith('/') ? path.slice(0, -1) : path;
+    }
+
+    private isPathVariable(segment: string): boolean {
+        return segment.startsWith('{') && segment.endsWith('}');
+    }
+
+    private specificity(path: string): number {
+        return this.normalizePath(path).split('/').filter(
+            segment => segment.length > 0 && !this.isPathVariable(segment)
+        ).length;
+    }
+
+    public pathMatch(
         frontendPath: string,
         backendPath: string
     ): boolean{
+
+        const normalizedFrontendPath = this.normalizePath(frontendPath);
+        const normalizedBackendPath = this.normalizePath(backendPath);
         
-        const frontendParts = frontendPath.split('/');
-        const backendParts= backendPath.split('/');
+        const frontendParts = normalizedFrontendPath.split('/');
+        const backendParts= normalizedBackendPath.split('/');
 
         if(frontendParts.length !== backendParts.length){
             return false;
@@ -20,8 +37,7 @@ export class EndpointMatcher {
             const backendpart= backendParts[i];
             const frontendPart= frontendParts[i];
 
-            const isPathVariable= 
-                backendpart.startsWith('{') && backendpart.endsWith('}');
+            const isPathVariable = this.isPathVariable(backendpart);
 
                 if(isPathVariable){
                     continue;
@@ -37,8 +53,7 @@ export class EndpointMatcher {
     public match(
         calls: HttpCall[],
         endpoints: HttpEndpoint[],
-        // Collect every compatible endpoint for reverse navigation, while
-        // keeping the first endpoint as the frontend navigation target.
+        // Reverse navigation records only the equally most-specific matches.
         usages?: Map<HttpEndpoint, HttpCall[]>
     ): MatchResult[] {
 
@@ -46,34 +61,48 @@ export class EndpointMatcher {
 
         for (const call of calls) {
 
-            let endpoint: HttpEndpoint | undefined;
+            const candidateEndpoints: HttpEndpoint[] = [];
+            let bestSpecificity = -1;
             for (const candidate of endpoints) {
                 if (candidate.method !== call.method ||
                     !this.pathMatch(call.path, candidate.path)) {
                     continue;
                 }
-                endpoint ??= candidate;
-                if (!usages) {
-                    break;
+                const specificity = this.specificity(candidate.path);
+                if (specificity < bestSpecificity) {
+                    continue;
                 }
-                const callsForEndpoint = usages.get(candidate) ?? [];
-                callsForEndpoint.push(call);
-                usages.set(candidate, callsForEndpoint);
+                if (specificity > bestSpecificity) {
+                    candidateEndpoints.length = 0;
+                    bestSpecificity = specificity;
+                }
+                candidateEndpoints.push(candidate);
             }
 
-            if (endpoint) {
-                results.push({
-                    call,
-                    endpoint,
-                    matched: true
-                });
-            } else {
-                results.push({
-                    call,
-                    endpoint: undefined,
-                    matched: false
-                });
+            // Keep ambiguity, but make the navigation target independent of scan order.
+            candidateEndpoints.sort((a, b) => {
+                for (const [left, right] of [[a.path, b.path], [a.filePath, b.filePath]]) {
+                    if (left !== right) {
+                        return left < right ? -1 : 1;
+                    }
+                }
+                return a.line - b.line;
+            });
+
+            if (usages) {
+                for (const candidate of candidateEndpoints) {
+                    const callsForEndpoint = usages.get(candidate) ?? [];
+                    callsForEndpoint.push(call);
+                    usages.set(candidate, callsForEndpoint);
+                }
             }
+
+            results.push({
+                call,
+                matched: candidateEndpoints.length > 0,
+                endpoint: candidateEndpoints[0],
+                candidateEndpoints
+            });
         }
 
         return results;
