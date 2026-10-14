@@ -13,6 +13,27 @@ suite('REST route specificity', () => {
     const matcher = new EndpointMatcher();
     const analyzer = new RestDiagnosticAnalyzer();
 
+    test('partial and unresolved calls skip matching and usage counts; resolved and legacy calls still match', () => {
+        const route = endpoint('/api/users/{id}');
+        const calls: HttpCall[] = [
+            { ...call('/api/users/{user.id}'), resolution: 'partial' },
+            { ...call('/api/users/{getId()}'), resolution: 'unresolved' },
+            { ...call('/api/users/{id}'), resolution: 'resolved' },
+            call('/api/users/123')
+        ];
+        for (const usages of [undefined, new Map<HttpEndpoint, HttpCall[]>()]) {
+            const matches = matcher.match(calls, [route], usages);
+            assert.strictEqual(matches.length, calls.length);
+            assert.deepStrictEqual(matches.slice(0, 2), calls.slice(0, 2).map(call => ({
+                call, matched: false, endpoint: undefined, candidateEndpoints: []
+            })));
+            assert.ok(matches.slice(2).every(match => match.matched && match.endpoint === route));
+            if (usages) {
+                assert.deepStrictEqual(usages.get(route), calls.slice(2));
+            }
+        }
+    });
+
     test('static wins in either endpoint order and with or without a usage map', () => {
         const staticRoute = endpoint('/api/chat/history');
         const dynamicRoute = endpoint('/api/chat/{userId}');

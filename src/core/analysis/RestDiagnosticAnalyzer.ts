@@ -15,7 +15,23 @@ export class RestDiagnosticAnalyzer {
     ): AnalysisDiagnostic[]{
         const diagnostics: AnalysisDiagnostic[]=[];
 
+
+
         for(const result of matches){
+
+            const call= result.call;
+
+            if(call.resolution === 'partial' || call.resolution==='unresolved'){
+                diagnostics.push({
+                    filePath:call.filePath,
+                    line:call.line,
+                    message: `Frontend route could not be fully resolved: ${call.method} ${call.path}`,
+                    severity: 'information',
+                    code: 'FSL004'
+                });
+                continue;
+            }
+
             if(result.matched && result.candidateEndpoints && result.candidateEndpoints.length>1){
                 diagnostics.push({
                     filePath:result.call.filePath,
@@ -34,7 +50,7 @@ export class RestDiagnosticAnalyzer {
                 continue;
             }
 
-            const call= result.call;
+
 
             const samePathEndpoints = endpoints.filter(endpoint =>
                 this.endpointMatcher.pathMatch(

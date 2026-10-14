@@ -4,4 +4,6 @@ export interface HttpCall{
     filePath: string;
 
     line: number;
+
+    resolution?: 'resolved' | 'partial' | 'unresolved';
 }

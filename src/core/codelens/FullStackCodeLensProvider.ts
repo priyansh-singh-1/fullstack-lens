@@ -179,9 +179,15 @@ console.log(
                 position
             );
 
-            const hasBackend= matchResult?.matched===true;
+            const isUnresolved =
+                call.resolution === 'partial' ||
+                call.resolution === 'unresolved';
 
-            const isAmbiguous = hasBackend && (matchResult.candidateEndpoints?.length ?? 0) > 1;
+            const hasAmbiguousBackend = matchResult.matched &&
+                (matchResult.candidateEndpoints?.length ?? 0) > 1;
+
+            const hasBackend = matchResult.matched && !hasAmbiguousBackend;
+            
             const hasMethodMismatch = !hasBackend && analysis.diagnostics.some(diagnostic =>
                 diagnostic.code === 'FSL002' && diagnostic.filePath === call.filePath &&
                 diagnostic.line === call.line
@@ -191,16 +197,20 @@ console.log(
             new vscode.CodeLens(
                 range,
                 {
-                    title: isAmbiguous
-                        ? `$(warning) Ambiguous Route · ${call.method} ${call.path}`
+                    title: isUnresolved
+                        ? `$(info) Unresolved Route · ${call.method} ${call.path}`
                         : hasBackend
-                        ? `→ Go to Backend · ${call.method} ${call.path}`
-                        : hasMethodMismatch
-                            ? `$(warning) Method Mismatch · ${call.method} ${call.path}`
-                            : `$(warning) No Backend Found · ${call.method} ${call.path}`,
-                    command: isAmbiguous
-                        ? 'fullstack-lens.selectBackendEndpoint'
-                        : 'fullstack-lens.goToBackend',
+                            ? `→ Go to Backend · ${call.method} ${call.path}`
+                            : hasAmbiguousBackend
+                                ? `$(warning) Ambiguous Route · ${call.method} ${call.path}`
+                                : hasMethodMismatch
+                                    ? `$(warning) Method Mismatch · ${call.method} ${call.path}`
+                                    : `$(warning) No Backend Found · ${call.method} ${call.path}`,
+                    command: isUnresolved
+                        ? 'fullstack-lens.showUnresolvedRouteInfo'
+                        : hasAmbiguousBackend
+                            ? 'fullstack-lens.selectBackendEndpoint'
+                                : 'fullstack-lens.goToBackend',
                     arguments:[
                         {
                             type: 'rest',

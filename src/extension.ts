@@ -7,6 +7,7 @@ import { FullStackCodeLensProvider } from './core/codelens/FullStackCodeLensProv
 import { AnalysisService } from './core/analysis/AnalysisService';
 import { registerAnalysisSaveRefresh } from './core/analysis/registerAnalysisSaveRefresh';
 import { FullStackDiagnosticManager } from './core/diagnostics/FullStackDiagnosticManager';
+import { METHODS } from 'http';
 
 
 
@@ -201,6 +202,7 @@ export async function activate(context: vscode.ExtensionContext) {
             
         );
 
+
     const findFrontendUsagesCommand =
         vscode.commands.registerCommand(
             'fullstack-lens.findFrontendUsages',
@@ -230,6 +232,22 @@ export async function activate(context: vscode.ExtensionContext) {
         }
     );
 
+    const showUnresolvedRouteInfoCommand = 
+            vscode.commands.registerCommand(
+                'fullstack-lens.showUnresolvedRouteInfo',
+                (target?:{
+                    method?: string;
+                    path?: string;
+                }) =>{
+                    const method = target?.method??  'UNKNOWN';
+                    const path = target?.path?? '';
+
+                    vscode.window.showInformationMessage(
+                         `FullStack Lens could not fully resolve this frontend route: ${method} ${path}`
+                    );
+                }
+            );
+
     const codeLensDisposable = vscode.languages.registerCodeLensProvider(
         [
             {scheme: 'file',language: 'javascript'},
@@ -253,6 +271,7 @@ export async function activate(context: vscode.ExtensionContext) {
         findFrontendUsagesCommand,
         codeLensDisposable,
         codeLensProvider,
+        showUnresolvedRouteInfoCommand,
         registerAnalysisSaveRefresh(analysisService, codeLensProvider)
     );
 

@@ -60,6 +60,16 @@ export class EndpointMatcher {
         const results: MatchResult[] = [];
 
         for (const call of calls) {
+            if (call.resolution === 'partial' || call.resolution === 'unresolved') {
+                results.push({
+                    call,
+                    matched: false,
+                    endpoint: undefined,
+                    candidateEndpoints: []
+                });
+
+                continue;
+            }
 
             const candidateEndpoints: HttpEndpoint[] = [];
             let bestSpecificity = -1;
