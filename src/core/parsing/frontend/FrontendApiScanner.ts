@@ -92,28 +92,82 @@ export class FrontendApiScanner{
     }
 
     private scanFetchCalls(
-        content: string,
-        filePath: string,
-        calls: HttpCall[]
-    ): void{
-        const fetchRegex= /fetch\s*\(\s*["'`]([^"'`]+)["'`]/gi;
+    content: string,
+    filePath: string,
+    calls: HttpCall[]
+): void {
 
-        let match: RegExpExecArray| null;
+    const fetchRegex = /fetch\s*\(/gi;
 
-        while((match= fetchRegex.exec(content))!==null){
-            const beforeMatch= content.substring(0,match.index);
+    let match: RegExpExecArray | null;
 
-            const line= beforeMatch.split('\n').length-1;
-            
-            calls.push({
-                method: 'GET',
-                path: this.normalizeUrl(match[1]),
-                resolution: this.classifyTemplateResolution(match[1]),
-                filePath,
-                line
-            });
+    while ((match = fetchRegex.exec(content)) !== null) {
+
+        const firstArgumentEnd  =
+            this.findTopLevelDelimiter(
+                content,
+                fetchRegex.lastIndex,
+                ',)'
+            );
+
+        if (
+            firstArgumentEnd  === null ||
+            firstArgumentEnd  === content.length
+        ) {
+            continue;
         }
+
+        const expression =
+            content.slice(
+                fetchRegex.lastIndex,
+                firstArgumentEnd 
+            );
+
+        const parsedRoute =
+            this.parseRouteExpression(expression);
+
+        if (!parsedRoute) {
+            continue;
+        }
+
+        let method='GET';
+        if(content[firstArgumentEnd]===','){
+            const secondArgumentStart = firstArgumentEnd+1;
+
+            const secondArgumentEnd =
+                this.findTopLevelDelimiter(
+                    content,
+                    secondArgumentStart,
+                    ')'
+                );
+
+                if(secondArgumentEnd !==null && secondArgumentEnd!== content.length){
+                    const optionsExpression = 
+                    content.slice(
+                        secondArgumentStart,
+                        secondArgumentEnd
+                    );
+
+                    method = this.extractFetchMethod(optionsExpression);
+                }
+        }
+
+
+        const beforeMatch =
+            content.substring(0, match.index);
+
+        const line =
+            beforeMatch.split('\n').length - 1;
+
+        calls.push({
+            method,
+            path: parsedRoute.path,
+            resolution: parsedRoute.resolution,
+            filePath,
+            line
+        });
     }
+}
 
 
     private findAxiosInstance(content: string): AxiosInstance[]{
@@ -136,11 +190,31 @@ export class FrontendApiScanner{
     private scanDirectAxiosCalls(
         content: string, filePath: string, calls: HttpCall[]
     ): void{
-        const regex=  /axios\.(get|post|put|delete|patch)\s*\(\s*["'`]([^"'`]+)["'`]/gi;
+        const regex=  /axios\.(get|post|put|delete|patch)\s*\(/gi;
 
         let match: RegExpExecArray | null;
 
         while((match= regex.exec(content))!==null){
+
+            const argumentEnd =
+            this.findTopLevelDelimiter(
+                content,
+                regex.lastIndex,
+                ',)'
+            );
+
+            if(argumentEnd === null || argumentEnd === content.length){
+                continue;
+            }
+
+            const expression = content.slice(
+                                        regex.lastIndex,
+                                        argumentEnd
+                                        );
+            const parsedRoute= this.parseRouteExpression(expression);
+            if(!parsedRoute){
+                continue;
+            }
 
             const beforeMatch= content.substring(0,match.index);
 
@@ -148,8 +222,8 @@ export class FrontendApiScanner{
 
             calls.push({
                 method: match[1].toUpperCase(),
-                path: this.normalizeUrl(match[2]),
-                resolution: this.classifyTemplateResolution(match[2]),
+                path: parsedRoute.path,
+                resolution: parsedRoute.resolution,
                 filePath,
                 line
             });
@@ -416,5 +490,22 @@ export class FrontendApiScanner{
     }
 
     return null;
+}
+
+private extractFetchMethod(optionsExpression: string | null): string {
+
+    if (!optionsExpression) {
+        return 'GET';
+    }
+
+    const methodMatch = optionsExpression.match(
+        /\bmethod\s*:\s*["'`](GET|POST|PUT|DELETE|PATCH)["'`]/i
+    );
+
+    if (!methodMatch) {
+        return 'GET';
+    }
+
+    return methodMatch[1].toUpperCase();
 }
 }
