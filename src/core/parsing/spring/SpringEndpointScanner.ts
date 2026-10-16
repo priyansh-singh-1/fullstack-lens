@@ -5,65 +5,61 @@ import { ProjectFile } from '../../models/ProjectFile';
 export class SpringEndpointScanner {
 
     public scan(files: ProjectFile[]): HttpEndpoint[] {
-
-        const endpoints: HttpEndpoint[] = [];
-
-        const javaFiles = files.filter(
-            file => file.language === 'java'
+        return files.filter(file => file.language === 'java').flatMap(file =>
+            this.scanFile(file, fs.readFileSync(file.path, 'utf-8'))
         );
+    }
 
-        for (const file of javaFiles) {
+    /** Scan supplied content only; preserve annotation-group ordering and offsets. */
+    public scanFile(file: ProjectFile, source: string): HttpEndpoint[] {
+        const endpoints: HttpEndpoint[] = [];
+        if (file.language !== 'java') { return endpoints; }
+        const content = source.replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\/\/[^\r\n]*|\/\*[\s\S]*?(?:\*\/|$)/g,
+                token => token.startsWith('/') ? token.replace(/[^\r\n]/g, ' ') : token);
 
-            const content = fs.readFileSync(
-                file.path,
-                'utf-8'
-            );
-
-            if(!content.includes("@RestController")){
-                continue;
-            }
-
-            const basePath = this.findBasePath(content);
-
-            const mappings = [
-                { annotation: 'GetMapping', method: 'GET' },
-                { annotation: 'PostMapping', method: 'POST' },
-                { annotation: 'PutMapping', method: 'PUT' },
-                { annotation: 'DeleteMapping', method: 'DELETE' },
-                { annotation: 'PatchMapping', method: 'PATCH' }
-            ];
-
-            for (const mapping of mappings) {
-
-                const regex = new RegExp(
-                    `@${mapping.annotation}\\s*\\(\\s*["']([^"']+)["']\\s*\\)`,
-                    'g'
-                );
-
-                let match : RegExpExecArray | null;
-
-                while ((match = regex.exec(content)) !== null) {
-
-                    const methodPath= match[1];
-                    const beforeMatch= content.substring(0,match.index);
-
-                    const line= beforeMatch.split('\n').length-1;
-
-                    const fullPath= this.combinePaths(
-                        basePath,
-                        methodPath
-                    );
-
-                    endpoints.push({
-                        method: mapping.method,
-                        path: fullPath,
-                        filePath: file.path,
-                        line,
-                    });
-                }
-            }
+        if(!content.includes("@RestController")){
+            return endpoints;
         }
 
+        const basePath = this.findBasePath(content);
+
+        const mappings = [
+            { annotation: 'GetMapping', method: 'GET' },
+            { annotation: 'PostMapping', method: 'POST' },
+            { annotation: 'PutMapping', method: 'PUT' },
+            { annotation: 'DeleteMapping', method: 'DELETE' },
+            { annotation: 'PatchMapping', method: 'PATCH' }
+        ];
+
+        for (const mapping of mappings) {
+
+            const regex = new RegExp(
+                `@${mapping.annotation}\\s*\\(\\s*["']([^"']+)["']\\s*\\)`,
+                'g'
+            );
+
+            let match : RegExpExecArray | null;
+
+            while ((match = regex.exec(content)) !== null) {
+
+                const methodPath= match[1];
+                const beforeMatch= content.substring(0,match.index);
+
+                const line= beforeMatch.split('\n').length-1;
+
+                const fullPath= this.combinePaths(
+                    basePath,
+                    methodPath
+                );
+
+                endpoints.push({
+                    method: mapping.method,
+                    path: fullPath,
+                    filePath: file.path,
+                    line,
+                });
+            }
+        }
         return endpoints;
     }
 

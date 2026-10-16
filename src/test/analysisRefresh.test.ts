@@ -266,6 +266,43 @@ suite('Saved-file invalidation and CodeLens events', () => {
         assert.strictEqual(scans, 0);
     });
 
+    test('WebSocket lenses use precomputed match status even when raw destinations coincide', async () => {
+        const service = new AnalysisService();
+        const result = snapshot(0);
+        const call = { type: 'publish' as const, destination: '/app/chat.send', filePath: 'Client.ts', line: 0 };
+        result.websocketCalls = [call];
+        result.websocketEndpoints = [{ inboundDestination: call.destination, filePath: 'Controller.java', line: 0 }];
+        result.websocketMatches = [{ call, matched: false }];
+        stubScan(service, async () => result);
+        const provider = new FullStackCodeLensProvider(service);
+        disposables.push(provider);
+        const doc = { languageId: 'typescript', fileName: call.filePath,
+            uri: vscode.Uri.file(call.filePath) } as vscode.TextDocument;
+        // Use the URI's absolute path consistently with the analysis snapshot.
+        call.filePath = doc.uri.fsPath;
+        const lenses = await provider.provideCodeLenses(doc);
+        assert.strictEqual(lenses.length, 1);
+        assert.strictEqual(lenses[0].command?.title, '$(warning) No Backend Found · PUBLISH /app/chat.send');
+        assert.strictEqual(lenses[0].command?.command, 'fullstack-lens.showNoBackendInfo');
+    });
+
+    test('a CodeLens request cannot publish a snapshot invalidated before its continuation runs', async () => {
+        const service = new AnalysisService();
+        stubScan(service, async revision => snapshot(revision));
+        const old = await service.getAnalysis();
+        // Model a save queued after getAnalysis resolves but before the provider resumes.
+        service.getAnalysis = async () => {
+            queueMicrotask(() => service.clearCache());
+            return old;
+        };
+        old.restMatches = [{ call: { method: 'GET', path: '/old', filePath: 'stale.ts', line: 0 }, matched: false }];
+        const provider = new FullStackCodeLensProvider(service);
+        try {
+            const doc = { languageId: 'typescript', fileName: 'stale.ts', uri: { fsPath: 'stale.ts' } } as vscode.TextDocument;
+            assert.deepStrictEqual(await provider.provideCodeLenses(doc), []);
+        } finally { provider.dispose(); }
+    });
+
     test('unsaved keystrokes do not invalidate analysis or emit a refresh', async () => {
         const doc = await document(`unsaved-${sequence++}.ts`);
         const service = new AnalysisService();
@@ -451,11 +488,101 @@ suite('Navigation and saved endpoint changes', () => {
 
     test('WebSocket/STOMP navigation works in both directions', async () => {
         const forward = await lens(frontend, 'websocket', '/app/chat.send');
+        assert.strictEqual(forward.command!.title, '$(radio-tower) Go to Backend · PUBLISH /app/chat.send');
+        assert.strictEqual(forward.command!.command, 'fullstack-lens.goToBackend');
         const reverse = await lens(backend, 'websocket', '/app/chat.send');
         assert.ok(reverse.command!.title.includes('1 Frontend Usage'));
         await vscode.window.showTextDocument(frontend);
         await execute(forward); assertEditor(backend, 5);
         await execute(reverse); assertEditor(frontend, 3);
+    });
+
+    test('publish CodeLens refreshes matched → unmatched → matched after frontend saves', async () => {
+        const initial = await lens(frontend, 'websocket', '/app/chat.send');
+        assert.strictEqual(initial.command!.command, 'fullstack-lens.goToBackend');
+        let previous = await api.analysisService.getAnalysis();
+        for (const destination of ['/app/chat.test', '/app/chat.send']) {
+            const refreshed = deferred<void>();
+            const listener = api.codeLensProvider.onDidChangeCodeLenses(() => refreshed.resolve());
+            try {
+                await save(frontend, js.replace('/app/chat.send', destination));
+                await refreshed.promise;
+                const current = await api.analysisService.getAnalysis();
+                assert.ok(current.revision > previous.revision);
+                const item = await lens(frontend, 'websocket', destination);
+                const matched = destination === '/app/chat.send';
+                assert.strictEqual(item.command!.title, matched
+                    ? `$(radio-tower) Go to Backend · PUBLISH ${destination}`
+                    : `$(warning) No Backend Found · PUBLISH ${destination}`);
+                assert.strictEqual(item.command!.command, matched
+                    ? 'fullstack-lens.goToBackend' : 'fullstack-lens.showNoBackendInfo');
+                assert.strictEqual(item.command!.arguments![0].revision, current.revision);
+                assert.ok((await lens(backend, 'websocket', '/app/chat.send')).command!.title
+                    .includes(`${matched ? 1 : 0} Frontend Usage`));
+                previous = current;
+            } finally { listener.dispose(); }
+        }
+        await vscode.window.showTextDocument(frontend);
+        await execute(await lens(frontend, 'websocket', '/app/chat.send'));
+        assertEditor(backend, 5);
+    });
+
+    test('clicking an unmatched publish only shows information and never attempts navigation', async () => {
+        await save(frontend, js.replace('/app/chat.send', '/app/chat.test'));
+        const item = await lens(frontend, 'websocket', '/app/chat.test');
+        assert.strictEqual(item.command!.title, '$(warning) No Backend Found · PUBLISH /app/chat.test');
+        assert.strictEqual(item.command!.command, 'fullstack-lens.showNoBackendInfo');
+        await vscode.window.showTextDocument(frontend);
+        const originalInfo = vscode.window.showInformationMessage;
+        const originalOpen = vscode.window.showTextDocument;
+        const originalAnalysis = api.analysisService.getAnalysis;
+        let messages = 0;
+        try {
+            vscode.window.showInformationMessage = ((message: string) => {
+                assert.strictEqual(message, 'No matching WebSocket backend endpoint found for this publish destination.');
+                messages++;
+                return Promise.resolve(undefined);
+            }) as typeof originalInfo;
+            vscode.window.showTextDocument = (() => {
+                assert.fail('An unmatched publish must not open a navigation target');
+            }) as typeof originalOpen;
+            api.analysisService.getAnalysis = async () => {
+                assert.fail('An unmatched publish click must not request navigation analysis');
+            };
+            await execute(item);
+            assert.strictEqual(messages, 1);
+            assert.strictEqual(vscode.window.activeTextEditor?.document.uri.fsPath, frontend.uri.fsPath);
+        } finally {
+            vscode.window.showInformationMessage = originalInfo;
+            vscode.window.showTextDocument = originalOpen;
+            api.analysisService.getAnalysis = originalAnalysis;
+        }
+    });
+
+    test('subscriptions and duplicate WebSocket endpoints preserve counts, ordering and first navigation target', async () => {
+        await save(backend, java.replace('void chat() {}',
+            'void chat() {}\n@MessageMapping("/chat.send")\nvoid duplicate() {}'));
+        await save(frontend, js + 'client.subscribe("/app/chat.send", handler);\n' +
+            'client.subscribe("/topic/messages", handler);\n' +
+            'client.publish({destination:"/app/chat.test"});\n' +
+            'client.publish({destination:"/app/chat.send"});\n');
+        const analysis = await api.analysisService.getAnalysis();
+        const endpoints = analysis.websocketEndpoints.filter(item => item.filePath === backend.uri.fsPath);
+        assert.strictEqual(endpoints.length, 2);
+        assert.deepStrictEqual(endpoints.map(endpoint => analysis.websocketUsages.get(endpoint)?.length), [2, 2]);
+        const matches = analysis.websocketMatches.filter(item => item.call.filePath === frontend.uri.fsPath);
+        assert.deepStrictEqual(matches.map(item => [item.call.line, item.matched]), [[3, true], [6, false], [7, true]]);
+        assert.strictEqual(matches[0].endpoint, endpoints[0]);
+        assert.strictEqual(matches[2].endpoint, endpoints[0]);
+        const lenses = (await api.codeLensProvider.provideCodeLenses(frontend))
+            .filter(item => item.command?.arguments?.[0].type === 'websocket');
+        assert.deepStrictEqual(lenses.map(item => item.range.start.line), [3, 6, 7]);
+        const reverse = (await api.codeLensProvider.provideCodeLenses(backend))
+            .filter(item => item.command?.arguments?.[0].type === 'websocket');
+        assert.ok(reverse.every(item => item.command!.title.includes('2 Frontend Usages')));
+        await vscode.window.showTextDocument(frontend);
+        await execute(lenses[0]);
+        assertEditor(backend, 5);
     });
 
     test('saving moved endpoint lines rejects old payloads and refreshed lenses navigate correctly', async () => {
@@ -488,6 +615,56 @@ suite('Navigation and saved endpoint changes', () => {
         const endpoint = analysis.restEndpoints.find(item => item.path === '/api/users/{id}');
         assert.ok(endpoint);
         assert.strictEqual(analysis.restUsages.get(endpoint)?.length, 2);
+    });
+
+    test('reverse usage Quick Pick selects the exact line, cancels, and rejects a selection after save', async () => {
+        await save(frontend, js + 'axios.get("/api/users/2");\n');
+        const reverse = await lens(backend, 'rest', '/api/users/{id}');
+        type UsagePick = vscode.QuickPickItem & { call: { filePath: string; line: number } };
+        const original = vscode.window.showQuickPick;
+        try {
+            vscode.window.showQuickPick = (async (items: UsagePick[]) => {
+                assert.deepStrictEqual(items.map(item => item.call.line), [1, 4]);
+                assert.ok(items[1].description?.endsWith(' : 5'));
+                return items[1];
+            }) as unknown as typeof original;
+            await vscode.window.showTextDocument(backend);
+            await execute(reverse); assertEditor(frontend, 4);
+            vscode.window.showQuickPick = (async () => undefined) as unknown as typeof original;
+            await vscode.window.showTextDocument(backend);
+            await execute(reverse);
+            assert.strictEqual(vscode.window.activeTextEditor?.document.uri.fsPath, backend.uri.fsPath);
+            vscode.window.showQuickPick = (async (items: UsagePick[]) => {
+                await save(frontend, '\n' + frontend.getText());
+                return items[1];
+            }) as unknown as typeof original;
+            await execute(reverse);
+            assert.strictEqual(vscode.window.activeTextEditor?.document.uri.fsPath, backend.uri.fsPath);
+        } finally { vscode.window.showQuickPick = original; }
+    });
+
+    test('CodeLens distinguishes missing and method-mismatched calls on the same line', async () => {
+        await save(frontend, 'axios.post("/api/users/1"); axios.get("/api/absent");\n');
+        assert.ok((await lens(frontend, 'rest', '/api/users/1')).command!.title.includes('Method Mismatch'));
+        assert.ok((await lens(frontend, 'rest', '/api/absent')).command!.title.includes('No Backend Found'));
+    });
+
+    test('relevant saves refresh published Problems diagnostics and remove fixed errors', async () => {
+        const diagnosticCodes = () => vscode.languages.getDiagnostics(frontend.uri)
+            .filter(d => d.source === 'FullStack Lens').map(d => d.code);
+        async function waitForCodes(expected: string[]) {
+            for (let attempt = 0; attempt < 100; attempt++) {
+                if (JSON.stringify(diagnosticCodes()) === JSON.stringify(expected)) { return; }
+                await delay(50);
+            }
+            assert.deepStrictEqual(diagnosticCodes(), expected);
+        }
+        await save(frontend, 'axios.post("/api/users/1");\n');
+        await waitForCodes(['FSL002']);
+        await save(frontend, 'axios.get("/api/users/1");\n');
+        await waitForCodes([]);
+        await save(backend, java.replace('@GetMapping("/users/{id}")', '@PostMapping("/users/{id}")'));
+        await waitForCodes(['FSL002']);
     });
 
     test('specific routes drive precomputed usages, CodeLens and navigation after saves', async () => {
@@ -542,11 +719,19 @@ suite('Navigation and saved endpoint changes', () => {
         const old = await api.analysisService.getAnalysis();
         let events = 0;
         const listener = api.codeLensProvider.onDidChangeCodeLenses(() => events++);
+        // Scan Workspace shows Output asynchronously; finish that UI transition
+        // before the next test selects a source editor.
+        const outputShown = deferred<void>();
+        const outputListener = vscode.window.onDidChangeActiveTextEditor(editor => {
+            if (editor?.document.uri.scheme === 'output') { outputShown.resolve(); }
+        });
+        if (vscode.window.activeTextEditor?.document.uri.scheme === 'output') { outputShown.resolve(); }
         try {
             await vscode.commands.executeCommand('fullstack-lens.scanWorkspace');
+            await outputShown.promise;
             assert.notStrictEqual(await api.analysisService.getAnalysis(), old);
             assert.strictEqual(events, 1);
-        } finally { listener.dispose(); }
+        } finally { listener.dispose(); outputListener.dispose(); }
     });
 
     test('missing or malformed targets complete without throwing or navigating', async () => {

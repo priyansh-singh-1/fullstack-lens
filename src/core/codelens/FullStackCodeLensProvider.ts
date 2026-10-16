@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { AnalysisService } from '../analysis/AnalysisService';
+import { EndpointMatcher } from '../matching/EndPointMatcher';
 
 
 
@@ -60,15 +61,13 @@ import { AnalysisService } from '../analysis/AnalysisService';
 
 const analysis =
     await this.analysisService.getAnalysis();
+        if (!this.analysisService.isCurrentRevision(analysis.revision)) { return []; }
 
 console.log(
     '[FSL] Analysis ready in',
     Math.round(performance.now() - startTime),
     'ms'
 );
-
-        const websocketCalls =
-            analysis.websocketCalls;
 
         const currentFile =
             document.uri.fsPath;
@@ -188,9 +187,8 @@ console.log(
 
             const hasBackend = matchResult.matched && !hasAmbiguousBackend;
             
-            const hasMethodMismatch = !hasBackend && analysis.diagnostics.some(diagnostic =>
-                diagnostic.code === 'FSL002' && diagnostic.filePath === call.filePath &&
-                diagnostic.line === call.line
+            const hasMethodMismatch = !matchResult.matched && !isUnresolved && analysis.restEndpoints.some(endpoint =>
+                new EndpointMatcher().pathMatch(call.path, endpoint.path)
             );
 
             const codeLens= 
@@ -228,14 +226,15 @@ console.log(
             codeLenses.push(codeLens);
         }
 
-        const websocketCallsInCurrentFile =websocketCalls.filter(
-            call => 
-                call.filePath === currentFile
+        const websocketMatchesInCurrentFile = analysis.websocketMatches.filter(
+            result =>
+                result.call.filePath === currentFile
             &&
-                call.type === 'publish'
+                result.call.type === 'publish'
         );
 
-        for(const call of websocketCallsInCurrentFile){
+        for(const matchResult of websocketMatchesInCurrentFile){
+            const call = matchResult.call;
             const position = new vscode.Position(
                 call.line,
                 0
@@ -250,8 +249,12 @@ console.log(
                 new vscode.CodeLens(
                     range,
                     {
-                        title: `$(radio-tower) Go to Backend .PUBLISH ${call.destination}`,
-                        command: `fullstack-lens.goToBackend`,
+                        title: matchResult.matched
+                            ? `$(radio-tower) Go to Backend · PUBLISH ${call.destination}`
+                            : `$(warning) No Backend Found · PUBLISH ${call.destination}`,
+                        command: matchResult.matched
+                            ? 'fullstack-lens.goToBackend'
+                            : 'fullstack-lens.showNoBackendInfo',
                         arguments: [
                             {
                                 type: 'websocket',

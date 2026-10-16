@@ -25,7 +25,7 @@ export function registerAnalysisSaveRefresh(
         if (!isRelevantAnalysisFile(document.uri)) {
             return;
         }
-        analysisService.clearCache();
+        analysisService.enqueueFileChange(document.uri.fsPath);
         if (timer !== undefined) {
             clearTimeout(timer);
         }

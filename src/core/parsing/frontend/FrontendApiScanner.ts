@@ -3,67 +3,43 @@ import { ProjectFile } from '../../models/ProjectFile';
 import { HttpCall } from '../../models/HttpCall';
 
 import { AxiosInstance } from '../../models/AxiosInstance';
-import * as path from 'path';
-import { p } from 'framer-motion/client';
+export interface ScannedAxiosInstance extends AxiosInstance {
+    filePath: string;
+    resolution: HttpCall['resolution'];
+}
 
 
 
 export class FrontendApiScanner{
     public scan(files: ProjectFile[]): HttpCall[] {
-
-    const calls: HttpCall[] = [];
-
-    const frontendFiles = files.filter(
-        file =>
-            file.language === 'javascript' ||
-            file.language === 'typescript'
-    );
-
-    // STEP 1: find axios instances from all frontend files
-    const axiosInstances: AxiosInstance[] = [];
-
-    for (const file of frontendFiles) {
-
-        const content = fs.readFileSync(
-            file.path,
-            'utf-8'
+        const sources = files.filter(file =>
+            file.language === 'javascript' || file.language === 'typescript'
+        ).map(file => ({ file, source: fs.readFileSync(file.path, 'utf-8') }));
+        const instances = sources.flatMap(({ file, source }) =>
+            this.discoverAxiosInstances(file, source)
         );
-
-        const instances = this.findAxiosInstance(content);
-
-        axiosInstances.push(...instances);
+        return sources.flatMap(({ file, source }) => this.scanFile(file, source, instances));
     }
 
-    // STEP 2: scan all frontend files for API calls
-    for (const file of frontendFiles) {
-
-        const content = fs.readFileSync(
-            file.path,
-            'utf-8'
-        );
-
-        this.scanDirectAxiosCalls(
-            content,
-            file.path,
-            calls
-        );
-
-        this.scanAxiosInstanceCalls(
-            content,
-            file.path,
-            axiosInstances,
-            calls
-        );
-
-        this.scanFetchCalls(
-            content,
-            file.path,
-            calls
-        );
+    /** Extract definitions without reading disk; collect all files before resolving calls. */
+    public discoverAxiosInstances(file: ProjectFile, source: string): ScannedAxiosInstance[] {
+        if (file.language !== 'javascript' && file.language !== 'typescript') { return []; }
+        return this.findAxiosInstance(source, file.path);
     }
 
-    return calls;
-}
+    /** Resolve one source using the complete, ordered workspace definition list. */
+    public scanFile(
+        file: ProjectFile,
+        source: string,
+        instances: readonly ScannedAxiosInstance[]
+    ): HttpCall[] {
+        if (file.language !== 'javascript' && file.language !== 'typescript') { return []; }
+        const calls: HttpCall[] = [];
+        this.scanDirectAxiosCalls(source, file.path, calls);
+        this.scanAxiosInstanceCalls(source, file.path, instances, calls);
+        this.scanFetchCalls(source, file.path, calls);
+        return calls;
+    }
 
     private scanAxiosCalls(
         content: string,
@@ -97,11 +73,12 @@ export class FrontendApiScanner{
     calls: HttpCall[]
 ): void {
 
-    const fetchRegex = /fetch\s*\(/gi;
+    const fetchRegex = /(?<![\w$.])fetch\s*\(/g;
+    const code = this.codeOnly(content);
 
     let match: RegExpExecArray | null;
 
-    while ((match = fetchRegex.exec(content)) !== null) {
+    while ((match = fetchRegex.exec(code)) !== null) {
 
         const firstArgumentEnd  =
             this.findTopLevelDelimiter(
@@ -170,17 +147,26 @@ export class FrontendApiScanner{
 }
 
 
-    private findAxiosInstance(content: string): AxiosInstance[]{
-        const instnace: AxiosInstance[]=[];
-
-        const regex=/(?:const|let|var)\s+(\w+)\s*=\s*axios\.create\s*\(\s*\{[\s\S]*?baseURL\s*:\s*["'`]([^"'`]+)["'`][\s\S]*?\}\s*\)/gi;
+    private findAxiosInstance(content: string, filePath: string): ScannedAxiosInstance[]{
+        const instnace: ScannedAxiosInstance[]=[];
+        const code = this.codeOnly(content);
+        const regex= /\b(?:const|let|var)\s+([\w$]+)\s*=\s*axios\.create\s*\(\s*\{/g;
 
         let match: RegExpExecArray| null;
 
-        while((match = regex.exec(content))!==null){
+        while((match = regex.exec(code))!==null){
+            const end = this.findTopLevelDelimiter(content, regex.lastIndex, '}');
+            if (end === null || end === content.length) { continue; }
+            const options = content.slice(regex.lastIndex, end);
+            const baseExpression = this.objectProperty(options, 'baseURL');
+            if (baseExpression === null) { continue; }
+            const base = this.parseRouteExpression(baseExpression, false);
+            if (!base) { continue; }
             instnace.push({
                 name: match[1],
-                baseUrl: match[2]
+                baseUrl: base.resolution === 'unresolved' ? '' : base.path,
+                resolution: base.resolution,
+                filePath
             });
         }
         return instnace;
@@ -190,11 +176,12 @@ export class FrontendApiScanner{
     private scanDirectAxiosCalls(
         content: string, filePath: string, calls: HttpCall[]
     ): void{
-        const regex=  /axios\.(get|post|put|delete|patch)\s*\(/gi;
+        const regex=  /(?<![\w$.])axios\.(get|post|put|delete|patch)\s*\(/g;
+        const code = this.codeOnly(content);
 
         let match: RegExpExecArray | null;
 
-        while((match= regex.exec(content))!==null){
+        while((match= regex.exec(code))!==null){
 
             const argumentEnd =
             this.findTopLevelDelimiter(
@@ -231,33 +218,43 @@ export class FrontendApiScanner{
     }
 
     private scanAxiosInstanceCalls(
-        content: string, filePath: string, instances: AxiosInstance[], calls: HttpCall[]
+        content: string, filePath: string, instances: readonly ScannedAxiosInstance[], calls: HttpCall[]
     ): void{
-        for(const instance of instances){
+        const code = this.codeOnly(content);
+        const names = new Set(instances.map(instance => instance.name));
+        for(const name of names){
+            const candidates = instances.filter(instance => instance.name === name);
+            const local = candidates.filter(instance => instance.filePath === filePath);
+            const applicable = local.length > 0 ? local : candidates;
+            // Without import/scope analysis, conflicting definitions are unknown.
+            const instance = applicable[0];
+            const conflicting = applicable.some(candidate => candidate.baseUrl !== instance.baseUrl ||
+                candidate.resolution !== instance.resolution);
             const escapedName= 
-            this.escapeRegex(instance.name);
+            this.escapeRegex(name);
 
             const regex = new RegExp(
-                 `${escapedName}\\.(get|post|put|delete|patch)\\s*\\(`,
-                  'gi'
+                 `(?<![\\w$.])${escapedName}\\.(get|post|put|delete|patch)\\s*\\(`,
+                  'g'
             );
 
             let match: RegExpExecArray | null;
 
-            while((match=regex.exec(content))!==null){
+            while((match=regex.exec(code))!==null){
 
                 const argumentEnd = this.findTopLevelDelimiter(content, regex.lastIndex, ',)');
                 if (argumentEnd === null || argumentEnd === content.length) {
                     continue;
                 }
                 const parsedRoute = this.parseRouteExpression(
-                    content.slice(regex.lastIndex, argumentEnd)
+                    content.slice(regex.lastIndex, argumentEnd), false
                 );
 
                 if(!parsedRoute){
                     continue;
                 }
-                const fullUrl= this.combineUrls(
+                const absolute = /^https?:\/\//i.test(parsedRoute.path);
+                const fullUrl= absolute ? parsedRoute.path : this.combineUrls(
                     instance.baseUrl,
                     parsedRoute.path
                 );
@@ -269,8 +266,9 @@ export class FrontendApiScanner{
                 calls.push({
                     method: match[1].toUpperCase(),
                     path: this.normalizeUrl(fullUrl),
-                    resolution: this.classifyTemplateResolution(instance.baseUrl) === 'partial'
-                        ? 'partial' : parsedRoute.resolution,
+                    resolution: parsedRoute.resolution === 'unresolved' ||
+                        (!absolute && (conflicting || instance.resolution === 'unresolved')) ? 'unresolved' :
+                        !absolute && instance.resolution === 'partial' ? 'partial' : parsedRoute.resolution,
                     filePath,
                     line
                 });
@@ -333,6 +331,72 @@ export class FrontendApiScanner{
         return null;
     }
 
+    // Keep offsets/newlines stable so discovery cannot match examples or comments.
+    private codeOnly(source: string, maskStrings = true): string {
+        let result = '';
+        for (let index = 0; index < source.length;) {
+            let end: number | null = null;
+            if ('"\'`'.includes(source[index])) {
+                const stringEnd = this.findStringEnd(source, index);
+                end = stringEnd === null ? source.length : stringEnd + 1;
+                if (!maskStrings) {
+                    result += source.slice(index, end);
+                    index = end;
+                    continue;
+                }
+                if (source[index] === '`') {
+                    // Template text is inert; interpolation bodies are executable code.
+                    let cursor = index;
+                    let template = '';
+                    for (let offset = index + 1; offset < end; offset++) {
+                        if (source[offset] === '\\') { offset++; continue; }
+                        if (!source.startsWith('${', offset)) { continue; }
+                        const close = this.findTopLevelDelimiter(source, offset + 2, '}');
+                        if (close === null || close >= end) { break; }
+                        template += source.slice(cursor, offset + 2).replace(/[^\r\n]/g, ' ');
+                        template += this.codeOnly(source.slice(offset + 2, close));
+                        cursor = close;
+                        offset = close;
+                    }
+                    result += template + source.slice(cursor, end).replace(/[^\r\n]/g, ' ');
+                    index = end;
+                    continue;
+                }
+            } else if (source.startsWith('//', index)) {
+                const newline = source.indexOf('\n', index + 2);
+                end = newline < 0 ? source.length : newline;
+            } else if (source.startsWith('/*', index)) {
+                const commentEnd = source.indexOf('*/', index + 2);
+                end = commentEnd < 0 ? source.length : commentEnd + 2;
+            }
+            if (end !== null) {
+                result += source.slice(index, end).replace(/[^\r\n]/g, ' ');
+                index = end;
+            } else {
+                result += source[index++];
+            }
+        }
+        return result;
+    }
+
+    // Inspect only immediate object properties, never nested headers/config.
+    private objectProperty(properties: string, name: string): string | null {
+        properties = this.codeOnly(properties, false);
+        let start = 0;
+        let value: string | null = null;
+        while (start < properties.length) {
+            const end = this.findTopLevelDelimiter(properties, start, ',');
+            if (end === null) { return null; }
+            const property = properties.slice(start, end).trim();
+            const key = /^(?:([\w$]+)|["']([^"']+)["'])\s*:/.exec(property);
+            if (key && (key[1] ?? key[2]) === name) {
+                value = property.slice(key[0].length).trim();
+            }
+            start = end + 1;
+        }
+        return value;
+    }
+
     private stringLiteralValue(expression: string): string | null {
         if (!['"', "'", '`'].includes(expression[0]) ||
             this.findStringEnd(expression, 0) !== expression.length - 1) {
@@ -357,17 +421,14 @@ export class FrontendApiScanner{
         // Convert JS template variables:
         // ${id} -> {id}
         // ${userId} -> {userId}
-        const normalizedTemplate = url.replace(
-        /\$\{([^}]+)\}/g,
-        '{$1}'
-        );
+        const normalizedTemplate = this.pathnameTemplate(url, true);
 
         try{
             const parsedUrl= new URL(normalizedTemplate);
-
-            return decodeURIComponent(parsedUrl.pathname);
+            try { return decodeURIComponent(parsedUrl.pathname); }
+            catch { return parsedUrl.pathname; }
         }catch{
-            const pathname = normalizedTemplate.split(/[?#]/)[0];
+            const pathname = normalizedTemplate;
             if(!pathname.startsWith('/')){
                 return `/${pathname}`;
             }
@@ -383,25 +444,29 @@ export class FrontendApiScanner{
 
     private classifyTemplateResolution(url: string):
         'resolved'| 'partial' {
+        return this.pathnameTemplate(url, false) === 'partial' ? 'partial' : 'resolved';
+    }
 
-        const pathOnly = url.split(/[?#]/)[0];
-
-        const expressions =[
-            ...pathOnly.matchAll(/\$\{([^}]+)\}/g)
-        ];
-
-        for(const expression of expressions){
-            const value= expression[1].trim();
-
-            const simpleIdentifier =
-                /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(value);
-
-                if(!simpleIdentifier){
-                    return 'partial';
-                }
+    // Query/fragment delimiters inside ${...} belong to the expression.
+    // Encode placeholders during URL parsing so operators cannot change URL structure.
+    private pathnameTemplate(url: string, normalize: boolean): string {
+        let path = '';
+        for (let index = 0; index < url.length; index++) {
+            if (url[index] === '?' || url[index] === '#') { break; }
+            if (url.startsWith('${', index)) {
+                const end = this.findTopLevelDelimiter(url, index + 2, '}');
+                if (end === null || end === url.length) { return normalize ? path + '{dynamic}' : 'partial'; }
+                const expression = url.slice(index + 2, end).trim();
+                if (!normalize && !/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(expression)) { return 'partial'; }
+                const placeholder = `{${expression}}`;
+                path += normalize && /^[a-z][a-z\d+.-]*:\/\//i.test(url)
+                    ? encodeURIComponent(placeholder) : placeholder;
+                index = end;
+            } else {
+                path += url[index];
+            }
         }
-
-        return 'resolved';
+        return normalize ? path : 'resolved';
     }
 
     private normalizeConcatenatedRoute(expression: string): {
@@ -456,9 +521,9 @@ export class FrontendApiScanner{
         };
     }
 
-    private parseRouteExpression(expression: string): {
+    private parseRouteExpression(expression: string, normalize = true): {
     path: string;
-    resolution: 'resolved' | 'partial';
+    resolution: 'resolved' | 'partial' | 'unresolved';
 } | null {
 
     const trimmed = expression.trim();
@@ -468,14 +533,14 @@ export class FrontendApiScanner{
     if (rawUrl !== null) {
 
         return {
-            path: this.normalizeUrl(rawUrl),
+            path: normalize ? this.normalizeUrl(rawUrl) : rawUrl,
             resolution: rawUrl.includes('${')
                 ? this.classifyTemplateResolution(rawUrl)
                 : 'resolved'
         };
     }
 
-    if (trimmed.includes('+')) {
+    if (this.findTopLevelDelimiter(trimmed, 0, '+') !== trimmed.length) {
         const concatenated =
             this.normalizeConcatenatedRoute(trimmed);
 
@@ -484,12 +549,12 @@ export class FrontendApiScanner{
         }
 
         return {
-            path: this.normalizeUrl(concatenated.path),
+            path: normalize ? this.normalizeUrl(concatenated.path) : concatenated.path,
             resolution: concatenated.resolution
         };
     }
 
-    return null;
+    return trimmed ? { path: trimmed, resolution: 'unresolved' } : null;
 }
 
 private extractFetchMethod(optionsExpression: string | null): string {
@@ -498,9 +563,10 @@ private extractFetchMethod(optionsExpression: string | null): string {
         return 'GET';
     }
 
-    const methodMatch = optionsExpression.match(
-        /\bmethod\s*:\s*["'`](GET|POST|PUT|DELETE|PATCH)["'`]/i
-    );
+    const options = optionsExpression.trim();
+    const value = options.startsWith('{') && options.endsWith('}')
+        ? this.objectProperty(options.slice(1, -1), 'method') : null;
+    const methodMatch = value?.match(/^["'`](GET|POST|PUT|DELETE|PATCH)["'`]$/i);
 
     if (!methodMatch) {
         return 'GET';

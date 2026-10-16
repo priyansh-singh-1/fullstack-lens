@@ -40,6 +40,7 @@ export class EndpointMatcher {
             const isPathVariable = this.isPathVariable(backendpart);
 
                 if(isPathVariable){
+                    if (frontendPart.length === 0) { return false; }
                     continue;
                 }
 

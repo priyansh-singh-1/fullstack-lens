@@ -248,6 +248,15 @@ export async function activate(context: vscode.ExtensionContext) {
                 }
             );
 
+    const showNoBackendInfoCommand = vscode.commands.registerCommand(
+        'fullstack-lens.showNoBackendInfo',
+        () => {
+            vscode.window.showInformationMessage(
+                'No matching WebSocket backend endpoint found for this publish destination.'
+            );
+        }
+    );
+
     const codeLensDisposable = vscode.languages.registerCodeLensProvider(
         [
             {scheme: 'file',language: 'javascript'},
@@ -260,7 +269,9 @@ export async function activate(context: vscode.ExtensionContext) {
     );
     const refreshDiagnostics = async () => {
         const analysis = await analysisService.getAnalysis();
-        diagnosticManager.update(analysis.diagnostics);
+        if (analysisService.isCurrentRevision(analysis.revision)) {
+            diagnosticManager.update(analysis.diagnostics);
+        }
     };
 
     context.subscriptions.push(
@@ -271,7 +282,11 @@ export async function activate(context: vscode.ExtensionContext) {
         findFrontendUsagesCommand,
         codeLensDisposable,
         codeLensProvider,
+        codeLensProvider.onDidChangeCodeLenses(() => {
+            void refreshDiagnostics().catch(error => outputChannel.appendLine(`Diagnostic refresh failed: ${String(error)}`));
+        }),
         showUnresolvedRouteInfoCommand,
+        showNoBackendInfoCommand,
         registerAnalysisSaveRefresh(analysisService, codeLensProvider)
     );
 

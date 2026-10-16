@@ -5,36 +5,19 @@ import { label } from 'framer-motion/client';
 
 export class FrontendWebSocketScanner{
 
-    public scan(files: ProjectFile[]): WebSocketCall[]{
-        const calls: WebSocketCall[]=[];
+    public scan(files: ProjectFile[]): WebSocketCall[] {
+        return files.filter(file =>
+            file.language === 'javascript' || file.language === 'typescript'
+        ).flatMap(file => this.scanFile(file, fs.readFileSync(file.path, 'utf-8')));
+    }
 
-        const frontendFiles= files.filter(
-            file=>
-                file.language==='javascript'||
-                file.language==='typescript'
-        );
-
-        for(const file of frontendFiles){
-            const content= fs.readFileSync(
-                file.path,
-                'utf-8'
-            );
-
-            this.scanPublishCalls(
-                content,
-                file.path,
-                calls
-            );
-
-            this.scanSubscribeCalls(
-                content,
-                file.path,
-                calls
-            );
-        }
-
+    /** Publish calls precede subscriptions, matching the full-scan path. */
+    public scanFile(file: ProjectFile, source: string): WebSocketCall[] {
+        if (file.language !== 'javascript' && file.language !== 'typescript') { return []; }
+        const calls: WebSocketCall[] = [];
+        this.scanPublishCalls(source, file.path, calls);
+        this.scanSubscribeCalls(source, file.path, calls);
         return calls;
-
     }
 
         // Detect:

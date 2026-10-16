@@ -8,78 +8,63 @@ import { b } from 'framer-motion/m';
 
 
 export class SpringWebSocketScanner{
-    public scan(files: ProjectFile[]): WebSocketEndpoint[]{
-        const endpoints: WebSocketEndpoint[]=[];
-            const javaFiles= files.filter(
-                file => file.language==='java'
-
-            );
-
-            const appPrefix= this.findApplicationPrefix(javaFiles);
-
-            for(const file of javaFiles){
-                const content= fs.readFileSync(
-                    file.path,
-                    'utf-8'
-                );
-
-                if(!content.includes('@MessageMapping')){
-                    continue;
-                }  
-                
-                const messageRegex= /@MessageMapping\s*\(\s*["']([^"']+)["']\s*\)/g;
-
-                let match: RegExpExecArray | null;
-
-                while ((match= messageRegex.exec(content))!==null){
-                    const messagePath= match[1];
-
-                    const inboundDestination= 
-                    this.combinePath(
-                        appPrefix,
-                        messagePath
-                    );
-
-                    const line= content.substring(
-                        0,
-                        match.index
-                    ).split('\n').length-1;
-
-                    const outboundDestination= 
-                    this.findSendToNearMatch(
-                        content,
-                        match.index
-                    );
-
-                    endpoints.push({
-                        inboundDestination,
-                        outboundDestination,
-                        filePath:file.path,
-                        line
-                    });
-                }
-            }
-            return endpoints;
-
-        
+    public scan(files: ProjectFile[]): WebSocketEndpoint[] {
+        const sources = files.filter(file => file.language === 'java').map(file => ({
+            file, source: fs.readFileSync(file.path, 'utf-8')
+        }));
+        const applicationPrefix = sources.map(({ file, source }) =>
+            this.discoverApplicationPrefix(file, source)
+        ).find(prefix => prefix !== undefined) ?? '';
+        return sources.flatMap(({ file, source }) => this.scanFile(file, source, applicationPrefix));
     }
 
-    private findApplicationPrefix(
-        javaFiles: ProjectFile[]
-    ): string{
-        for(const file of javaFiles){
-            const content= fs.readFileSync(
-                file.path,
-                'utf-8'
+    /** First prefix in this Java source; callers select the first defined workspace result. */
+    public discoverApplicationPrefix(file: ProjectFile, source: string): string | undefined {
+        if (file.language !== 'java') { return undefined; }
+        return /setApplicationDestinationPrefixes\s*\(\s*["']([^"']+)["']\s*\)/.exec(source)?.[1];
+    }
+
+    /** Resolve mappings using the workspace prefix, without reading other sources. */
+    public scanFile(file: ProjectFile, source: string, applicationPrefix: string): WebSocketEndpoint[] {
+        const endpoints: WebSocketEndpoint[] = [];
+        if (file.language !== 'java') { return endpoints; }
+        const content = source;
+        if(!content.includes('@MessageMapping')){
+            return endpoints;
+        }
+
+        const messageRegex= /@MessageMapping\s*\(\s*["']([^"']+)["']\s*\)/g;
+
+        let match: RegExpExecArray | null;
+
+        while ((match= messageRegex.exec(content))!==null){
+            const messagePath= match[1];
+
+            const inboundDestination=
+            this.combinePath(
+                applicationPrefix,
+                messagePath
             );
 
-            const match=/setApplicationDestinationPrefixes\s*\(\s*["']([^"']+)["']\s*\)/.exec(content);
+            const line= content.substring(
+                0,
+                match.index
+            ).split('\n').length-1;
 
-            if(match){
-                return match[1];
-            }
+            const outboundDestination=
+            this.findSendToNearMatch(
+                content,
+                match.index
+            );
+
+            endpoints.push({
+                inboundDestination,
+                outboundDestination,
+                filePath:file.path,
+                line
+            });
         }
-        return '';
+        return endpoints;
     }
 
     private findSendToNearMatch(
